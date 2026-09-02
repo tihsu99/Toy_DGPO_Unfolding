@@ -1,0 +1,57 @@
+seed: 12345
+device: cpu
+output_dir: /tmp/toy_dgpo_smoke
+
+physics:
+  nominal_C: 0.60
+  true_C_values: [0.20, 0.40, 0.60, 0.80]
+  physical_C_range: [-0.95, 0.95]
+  detector_resolution: 0.35
+  auxiliary_resolution: 0.20
+  detector_bias: 0.00
+
+data:
+  nominal_events: 6000
+  train_fraction: 0.50
+  score_fraction: 0.20
+  pseudo_experiments: 3
+  events_per_pseudo_experiment: 500
+  pseudo_batch_size: 2
+
+model:
+  hidden_width: 32
+  hidden_layers: 2
+  policy_sigma: 0.08
+
+training:
+  batch_size: 512
+  baseline_epochs: 1
+  score_epochs: 1
+  dgpo_epochs: 1
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  group_size: 4
+  policy_updates: 2
+  clip_epsilon: 0.20
+  anchor_strength: 1.0
+  bias_penalty: 2.0
+  grad_clip_norm: 5.0
+
+unfolding:
+  truth_bins: 8
+  reco_bins: 8
+  iterations: 4
+  covariance_rcond: 1.0e-8
+  scan_points: 101
+
+policies:
+  baseline: true
+  fisher_dgpo: true
+  bias_controlled_dgpo: true
+
+plots:
+  dpi: 80
+  representative_C_values: [0.40, 0.80]
+  pull_range: [-4.0, 4.0]
+  pull_bins: 16
+  estimate_bins: 12

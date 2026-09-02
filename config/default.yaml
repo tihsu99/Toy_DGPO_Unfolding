@@ -1,0 +1,57 @@
+seed: 12345
+device: auto
+output_dir: outputs/default
+
+physics:
+  nominal_C: 0.60
+  true_C_values: [0.20, 0.40, 0.60, 0.80, 0.90]
+  physical_C_range: [-0.95, 0.95]
+  detector_resolution: 0.35
+  auxiliary_resolution: 0.20
+  detector_bias: 0.00
+
+data:
+  nominal_events: 240000
+  train_fraction: 0.50
+  score_fraction: 0.20
+  pseudo_experiments: 300
+  events_per_pseudo_experiment: 20000
+  pseudo_batch_size: 20
+
+model:
+  hidden_width: 64
+  hidden_layers: 2
+  policy_sigma: 0.08
+
+training:
+  batch_size: 4096
+  baseline_epochs: 35
+  score_epochs: 25
+  dgpo_epochs: 30
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  group_size: 8
+  policy_updates: 2
+  clip_epsilon: 0.20
+  anchor_strength: 1.0
+  bias_penalty: 2.0
+  grad_clip_norm: 5.0
+
+unfolding:
+  truth_bins: 16
+  reco_bins: 16
+  iterations: 4
+  covariance_rcond: 1.0e-8
+  scan_points: 381
+
+policies:
+  baseline: true
+  fisher_dgpo: true
+  bias_controlled_dgpo: true
+
+plots:
+  dpi: 160
+  representative_C_values: [0.40, 0.80]
+  pull_range: [-4.0, 4.0]
+  pull_bins: 32
+  estimate_bins: 32

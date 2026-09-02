@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "toy-dgpo-unfolding"
+version = "0.1.0"
+description = "GPU-capable DGPO toy study with off-nominal Bayesian-unfolding closure tests"
+requires-python = ">=3.10"
+dependencies = [
+  "matplotlib>=3.8",
+  "numpy>=1.26",
+  "PyYAML>=6.0",
+  "torch>=2.2,<2.9; platform_system == 'Darwin'",
+  "torch>=2.2; platform_system != 'Darwin'",
+  "tqdm>=4.66",
+]
+
+[project.scripts]
+toy-dgpo = "toy_dgpo_unfolding.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
