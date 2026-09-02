@@ -1,14 +1,20 @@
 seed: 12345
 device: cpu
-output_dir: /tmp/toy_dgpo_smoke
+output_dir: /tmp/toy_dgpo_ztautau_smoke
 
 physics:
   nominal_C: 0.60
-  true_C_values: [0.20, 0.40, 0.60, 0.80]
-  physical_C_range: [-0.95, 0.95]
-  detector_resolution: 0.35
-  auxiliary_resolution: 0.20
-  detector_bias: 0.00
+  true_C_values: [0.20, 0.40, 0.60, 0.80, 0.90]
+  m_Z: 91.1876
+  m_tau: 1.77686
+  visible_beta_alpha: 2.0
+  visible_beta_beta: 2.0
+  axis_singularity_tolerance: 1.0e-6
+  validity_tolerance: 1.0e-8
+
+detector:
+  relative_energy_resolution: 0.03
+  angular_resolution: 0.015
 
 data:
   nominal_events: 6000
@@ -16,52 +22,53 @@ data:
   score_fraction: 0.20
   pseudo_experiments: 3
   events_per_pseudo_experiment: 500
-  pseudo_batch_size: 2
 
-model:
+flow:
+  context_dim: 8
   hidden_width: 32
-  hidden_layers: 2
-  policy_sigma: 0.08
+  coupling_layers: 4
+  scale_limit: 1.5
 
 training:
   batch_size: 512
-  baseline_epochs: 1
-  score_epochs: 1
-  dgpo_epochs: 1
+  baseline_epochs: 20
+  score_epochs: 10
   learning_rate: 0.001
-  weight_decay: 0.00001
-  group_size: 4
-  policy_updates: 2
-  score_refresh_epochs: 1
-  score_refresh_interval: 1
-  clip_epsilon: 0.20
-  anchor_strength: 1.0
-  bias_penalty: 2.0
-  conditional_calibration_bins: 8
-  conditional_calibration_strength: 10.0
-  bias_controlled_calibration_multiplier: 2.0
+  weight_decay: 1.0e-5
   grad_clip_norm: 5.0
+  score_hidden_width: 32
+  score_hidden_layers: 2
 
-unfolding:
-  truth_bins: 8
-  reco_bins: 8
-  iterations: 4
+fisher_validation:
+  reco_bins: 12
+  pseudo_experiments: 5
+  events_per_pseudo_experiment: 500
+  relative_tolerance: 20.0
+
+dgpo:
+  epochs: 2
+  group_size: 8
+  learning_rate: 0.0002
+  weight_decay: 1.0e-5
+  reward_scale: 10000.0
+  trust_kl_coefficient: 0.10
+  no_trust_kl_coefficient: 0.0
+  monitor_events: 1000
+
+inference:
+  reco_bins: 12
+  scan_range: [-0.95, 0.95]
   scan_points: 101
 
 policies:
   baseline: true
-  fisher_dgpo: true
-  bias_controlled_dgpo: true
-
-diagnostics:
-  events_per_C: 2000
-  truth_hist_bins: 30
-  reco_vs_truth_bins: 30
-  response_rank_rcond: 1.0e-3
+  fisher_dgpo_no_trust: true
+  fisher_dgpo_trust: true
+  fisher_dgpo_trust_bias_control: false
 
 plots:
   dpi: 80
-  representative_C_values: [0.40, 0.80]
-  pull_range: [-4.0, 4.0]
-  pull_bins: 16
-  estimate_bins: 12
+  diagnostic_events: 10000
+  candidate_display_events: 3
+  response_bins: 12
+  reweight_validation_bins: 15

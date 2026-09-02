@@ -5,32 +5,19 @@ import json
 from pathlib import Path
 from typing import Any
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from tqdm.auto import tqdm
 import yaml
 
-from .core import (
-    detector_features,
-    load_config,
-    make_generator,
-    make_policy,
-    reconstruct,
-    resolve_device,
-    sample_truth,
-    seed_everything,
+from .core import ScoreModel, load_config, make_generator, resolve_device, seed_everything
+from .flow import ConditionalFlow
+from .inference import binned_fisher_per_event, fit_poisson, reweighted_templates
+from .training import (
+    make_flow, make_reference_reconstruction, reconstruct_policy, slice_events,
+    train_baseline, train_dgpo, train_reference_score,
 )
-from .training import train_baseline, train_dgpo, train_score_model
-from .diagnostics import make_diagnostics
-from .unfolding import (
-    fit_poisson_parameter,
-    response_matrix,
-    reweighted_reco_templates,
-)
+from .ztautau import generate_events
 
 
 def _paths(config: dict[str, Any]) -> tuple[Path, Path]:
@@ -41,333 +28,227 @@ def _paths(config: dict[str, Any]) -> tuple[Path, Path]:
     return output, checkpoints
 
 
-def _save_config(config: dict[str, Any], output: Path) -> None:
-    with (output / "resolved_config.yaml").open("w", encoding="utf-8") as stream:
-        yaml.safe_dump(config, stream, sort_keys=False)
-
-
-def _nominal_sample(config: dict[str, Any], device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
-    generator = make_generator(device, int(config["seed"]))
-    truth = sample_truth(
-        int(config["data"]["nominal_events"]),
-        float(config["physics"]["nominal_C"]),
-        device,
-        generator,
-    )
-    return detector_features(truth, config["physics"], generator), truth
-
-
-def _split_nominal(
-    features: torch.Tensor, truth: torch.Tensor, config: dict[str, Any]
-) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
-    count = truth.numel()
+def _split_nominal(events: dict[str, torch.Tensor], config: dict[str, Any]) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    count = events["x"].numel()
     train_end = int(count * float(config["data"]["train_fraction"]))
     score_end = train_end + int(count * float(config["data"]["score_fraction"]))
     if not 0 < train_end < score_end < count:
-        raise ValueError("train_fraction and score_fraction must leave a non-empty response split")
-    return (
-        (features[:train_end], truth[:train_end]),
-        (features[train_end:score_end], truth[train_end:score_end]),
-        (features[score_end:], truth[score_end:]),
+        raise ValueError("Nominal split fractions must leave non-empty train, score, and calibration samples")
+    return slice_events(events, slice(0, train_end)), slice_events(events, slice(train_end, score_end)), slice_events(events, slice(score_end, count))
+
+
+def _nominal_events(config: dict[str, Any], device: torch.device) -> dict[str, torch.Tensor]:
+    return generate_events(
+        int(config["data"]["nominal_events"]), float(config["physics"]["nominal_C"]),
+        config, device, make_generator(device, int(config["seed"])),
     )
 
 
-def train_pipeline(config: dict[str, Any], device: torch.device) -> dict[str, torch.nn.Module]:
-    output, checkpoints = _paths(config)
-    _save_config(config, output)
-    features, truth = _nominal_sample(config, device)
-    train_data, score_data, _ = _split_nominal(features, truth, config)
+def _scan(config: dict[str, Any]) -> np.ndarray:
+    bounds = config["inference"]["scan_range"]
+    return np.linspace(float(bounds[0]), float(bounds[1]), int(config["inference"]["scan_points"]))
 
-    baseline = train_baseline(*train_data, config, device)
-    score_model = train_score_model(baseline, *score_data, config, device)
-    policies: dict[str, torch.nn.Module] = {"baseline": baseline}
-    policy_scores: dict[str, torch.nn.Module] = {"baseline": score_model}
-    if bool(config["policies"].get("fisher_dgpo", False)):
-        policies["fisher_dgpo"], policy_scores["fisher_dgpo"] = train_dgpo(
-            baseline, score_model, *train_data, *score_data, config, device, False
-        )
-    if bool(config["policies"].get("bias_controlled_dgpo", False)):
-        policies["bias_controlled_dgpo"], policy_scores["bias_controlled_dgpo"] = train_dgpo(
-            baseline, score_model, *train_data, *score_data, config, device, True
-        )
 
+def _fit_reconstructed(
+    reconstructed: dict[str, torch.Tensor], calibration_events: dict[str, torch.Tensor],
+    calibration: dict[str, torch.Tensor], config: dict[str, Any], bins: int | None = None,
+) -> tuple[float, float, float, np.ndarray]:
+    bin_count = bins or int(config["inference"]["reco_bins"])
+    edges = np.linspace(-1.0, 1.0, bin_count + 1)
+    valid = reconstructed["valid"].cpu().numpy().astype(bool)
+    observed, _ = np.histogram(reconstructed["y"].cpu().numpy()[valid], bins=edges)
+    calibration_valid = calibration["valid"].cpu().numpy().astype(bool)
+    templates = reweighted_templates(
+        calibration_events["x"].cpu().numpy(), calibration["y"].cpu().numpy(), calibration_valid,
+        edges, float(config["physics"]["nominal_C"]), _scan(config), float(reconstructed["y"].numel()),
+    )
+    return fit_poisson(observed, templates, _scan(config))
+
+
+def validate_reference_fisher(
+    reference_flow: ConditionalFlow, score_model: ScoreModel, calibration_events: dict[str, torch.Tensor],
+    config: dict[str, Any], device: torch.device, output: Path,
+) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
+    calibration = make_reference_reconstruction(reference_flow, score_model, calibration_events, config, int(config["seed"]) + 21000)
+    settings = config["fisher_validation"]
+    event_count = int(settings["events_per_pseudo_experiment"])
+    score_fisher_per_event = float(calibration["information"].mean())
+    edges = np.linspace(-1.0, 1.0, int(settings["reco_bins"]) + 1)
+    binned = binned_fisher_per_event(
+        calibration_events["x"].cpu().numpy(), calibration["y"].cpu().numpy(),
+        calibration["valid"].cpu().numpy().astype(bool), edges, float(config["physics"]["nominal_C"]),
+    )
+    estimates = []
+    for index in tqdm(range(int(settings["pseudo_experiments"])), desc="pre-DGPO Fisher closure", unit="toy"):
+        generator = make_generator(device, int(config["seed"]) + 22000 + index)
+        pseudo = generate_events(event_count, float(config["physics"]["nominal_C"]), config, device, generator)
+        reconstructed = reconstruct_policy(reference_flow, pseudo, config, generator)
+        estimate, _, _, _ = _fit_reconstructed(reconstructed, calibration_events, calibration, config, int(settings["reco_bins"]))
+        estimates.append(estimate)
+    observed_sigma = float(np.std(estimates, ddof=1))
+    sigma_score = float(1.0 / np.sqrt(score_fisher_per_event * event_count))
+    sigma_binned = float(1.0 / np.sqrt(binned * event_count))
+    values = np.array([sigma_score, sigma_binned, observed_sigma])
+    disagreement = float(values.max() / values.min() - 1.0)
+    result = {
+        "score_fisher_per_event": score_fisher_per_event,
+        "binned_fisher_per_event": binned,
+        "score_fisher_for_pseudo_experiment": score_fisher_per_event * event_count,
+        "binned_fisher_for_pseudo_experiment": binned * event_count,
+        "sigma_score": sigma_score,
+        "sigma_binned": sigma_binned,
+        "sigma_pseudo_experiments": observed_sigma,
+        "relative_spread": disagreement,
+        "relative_tolerance": float(settings["relative_tolerance"]),
+        "passed": disagreement <= float(settings["relative_tolerance"]),
+        "pseudo_estimates": estimates,
+    }
+    with (output / "fisher_validation.json").open("w", encoding="utf-8") as stream:
+        json.dump(result, stream, indent=2)
+    return result, calibration
+
+
+def _save_models(
+    policies: dict[str, ConditionalFlow], score_model: ScoreModel, checkpoints: Path
+) -> None:
     for name, policy in policies.items():
-        torch.save({"method_version": 2, "state_dict": policy.state_dict()}, checkpoints / f"{name}.pt")
-        torch.save(
-            {"method_version": 2, "state_dict": policy_scores[name].state_dict()},
-            checkpoints / f"{name}_score.pt",
-        )
-    return policies
+        torch.save({"method_version": 3, "state_dict": policy.state_dict()}, checkpoints / f"{name}.pt")
+    torch.save({"method_version": 3, "state_dict": score_model.state_dict()}, checkpoints / "reference_score.pt")
 
 
-def load_policies(config: dict[str, Any], device: torch.device) -> dict[str, torch.nn.Module]:
-    _, checkpoints = _paths(config)
+def _load_models(config: dict[str, Any], device: torch.device, checkpoints: Path) -> tuple[dict[str, ConditionalFlow], ScoreModel]:
     names = [name for name, enabled in config["policies"].items() if enabled]
-    if "baseline" not in names:
-        names.insert(0, "baseline")
-    policies: dict[str, torch.nn.Module] = {}
+    policies: dict[str, ConditionalFlow] = {}
     for name in names:
-        path = checkpoints / f"{name}.pt"
-        if not path.exists():
-            raise FileNotFoundError(f"Missing checkpoint {path}; run the train command first")
-        payload = torch.load(path, map_location=device, weights_only=True)
-        if not isinstance(payload, dict) or payload.get("method_version") != 2:
-            raise RuntimeError(f"Checkpoint {path} predates the current-score DGPO method; run the train command again")
-        model = make_policy(config).to(device)
-        model.load_state_dict(payload["state_dict"])
-        policies[name] = model.eval()
-    return policies
+        payload = torch.load(checkpoints / f"{name}.pt", map_location=device, weights_only=True)
+        if payload.get("method_version") != 3:
+            raise RuntimeError("Checkpoint is not from the Z-to-tau-tau flow method; retrain it")
+        policy = make_flow(config, device)
+        policy.load_state_dict(payload["state_dict"])
+        policies[name] = policy.eval()
+    score_payload = torch.load(checkpoints / "reference_score.pt", map_location=device, weights_only=True)
+    if score_payload.get("method_version") != 3:
+        raise RuntimeError("Score checkpoint is not from the Z-to-tau-tau flow method; retrain it")
+    settings = config["training"]
+    score_model = ScoreModel(int(settings["score_hidden_width"]), int(settings["score_hidden_layers"])).to(device)
+    score_model.load_state_dict(score_payload["state_dict"])
+    return policies, score_model.eval()
 
 
-def _calibration_for_policy(
-    policy: torch.nn.Module,
-    response_features: torch.Tensor,
-    response_truth: torch.Tensor,
-    config: dict[str, Any],
-    generator: torch.Generator,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    unfolding = config["unfolding"]
-    sigma = float(config["model"]["policy_sigma"])
-    reco = reconstruct(policy, response_features, sigma, generator).cpu().numpy()
-    truth = response_truth.cpu().numpy()
-    truth_edges = np.linspace(-1.0, 1.0, int(unfolding["truth_bins"]) + 1)
-    reco_edges = np.linspace(-1.0, 1.0, int(unfolding["reco_bins"]) + 1)
-    response, prior = response_matrix(truth, reco, truth_edges, reco_edges)
-    return truth, reco, truth_edges, reco_edges, response, prior
+def _write_history(output: Path, histories: dict[str, list[dict[str, float]]]) -> None:
+    for name, rows in histories.items():
+        with (output / f"training_{name}.csv").open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
 
 
-def _evaluate_pseudo_dataset(
-    reco: np.ndarray,
-    calibration: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
-    config: dict[str, Any],
-) -> tuple[float, float, float]:
-    nominal_truth, nominal_reco, _, reco_edges, _, _ = calibration
-    counts, _ = np.histogram(reco, bins=reco_edges)
-    settings = config["unfolding"]
-    bounds = config["physics"]["physical_C_range"]
-    scan = np.linspace(float(bounds[0]), float(bounds[1]), int(settings["scan_points"]))
-    templates = reweighted_reco_templates(
-        nominal_truth,
-        nominal_reco,
-        reco_edges,
-        float(config["physics"]["nominal_C"]),
-        scan,
-        float(counts.sum()),
-    )
-    estimate, lower_error, upper_error, _ = fit_poisson_parameter(counts, templates, scan)
-    return estimate, lower_error, upper_error
-
-
-def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
-    with path.open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
+def train_pipeline(
+    config: dict[str, Any], device: torch.device, nominal: dict[str, torch.Tensor], output: Path, checkpoints: Path,
+) -> tuple[dict[str, ConditionalFlow], ScoreModel, dict[str, list[dict[str, float]]], dict[str, Any], dict[str, torch.Tensor]]:
+    train_events, score_events, calibration_events = _split_nominal(nominal, config)
+    baseline = train_baseline(train_events, config, device)
+    reference_flow = baseline.eval()
+    for parameter in reference_flow.parameters():
+        parameter.requires_grad_(False)
+    score_model, _ = train_reference_score(reference_flow, score_events, config, device)
+    fisher_validation, baseline_calibration = validate_reference_fisher(reference_flow, score_model, calibration_events, config, device, output)
+    if not fisher_validation["passed"]:
+        from .plots import plot_pre_dgpo
+        plot_pre_dgpo(
+            nominal, calibration_events, score_model,
+            baseline_calibration, fisher_validation, config, output,
+        )
+        raise RuntimeError(f"Pre-DGPO Fisher closure failed: relative spread {fisher_validation['relative_spread']:.3f} exceeds tolerance")
+    reference_train = make_reference_reconstruction(reference_flow, score_model, train_events, config, int(config["seed"]) + 23000)
+    policies: dict[str, ConditionalFlow] = {"baseline": reference_flow}
+    histories: dict[str, list[dict[str, float]]] = {}
+    if config["policies"].get("fisher_dgpo_no_trust", False):
+        policies["fisher_dgpo_no_trust"], histories["fisher_dgpo_no_trust"] = train_dgpo(
+            reference_flow, score_model, train_events, reference_train, config, device,
+            "fisher_dgpo_no_trust", float(config["dgpo"]["no_trust_kl_coefficient"]),
+        )
+    if config["policies"].get("fisher_dgpo_trust", False):
+        policies["fisher_dgpo_trust"], histories["fisher_dgpo_trust"] = train_dgpo(
+            reference_flow, score_model, train_events, reference_train, config, device,
+            "fisher_dgpo_trust", float(config["dgpo"]["trust_kl_coefficient"]),
+        )
+    if config["policies"].get("fisher_dgpo_trust_bias_control", False):
+        raise RuntimeError("Bias-control policy is intentionally disabled until the three primary policies establish score imbalance")
+    _save_models(policies, score_model, checkpoints)
+    _write_history(output, histories)
+    return policies, score_model, histories, fisher_validation, baseline_calibration
 
 
 def _summarize(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    summaries: list[dict[str, Any]] = []
-    keys = sorted({(str(row["policy"]), float(row["C_true"])) for row in rows})
-    for policy, C_true in keys:
-        selected = [row for row in rows if row["policy"] == policy and float(row["C_true"]) == C_true]
-        estimates = np.array([float(row["C_hat"]) for row in selected])
-        pulls = np.array([float(row["pull"]) for row in selected])
+    summaries = []
+    for policy, C_true in sorted({(row["policy"], row["C_true"]) for row in rows}):
+        selected = [row for row in rows if row["policy"] == policy and row["C_true"] == C_true]
+        estimates = np.array([row["C_hat"] for row in selected])
+        pulls = np.array([row["pull"] for row in selected])
         bias = float(estimates.mean() - C_true)
-        standard_deviation = float(estimates.std(ddof=1))
-        normalized_bias = bias / standard_deviation if standard_deviation > 0.0 else None
-        coverage = float(np.mean([bool(row["covered_68"]) for row in selected]))
-        count = estimates.size
+        spread = float(estimates.std(ddof=1))
+        coverage = float(np.mean([row["covered_68"] for row in selected]))
+        count = len(selected)
         denominator = 1.0 + 1.0 / count
-        coverage_center = (coverage + 0.5 / count) / denominator
-        coverage_half_width = np.sqrt(coverage * (1.0 - coverage) / count + 0.25 / count**2) / denominator
-        summaries.append(
-            {
-                "inference_method": "poisson_forward_folding",
-                "policy": policy,
-                "C_true": C_true,
-                "mean_C_hat": float(estimates.mean()),
-                "mean_C_hat_error": standard_deviation / np.sqrt(estimates.size),
-                "bias": bias,
-                "normalized_bias": normalized_bias,
-                "std_C_hat": standard_deviation,
-                "rmse": float(np.sqrt(bias**2 + standard_deviation**2)),
-                "mean_reported_sigma": float(np.mean([float(row["sigma_C_hat"]) for row in selected])),
-                "pull_mean": float(pulls.mean()),
-                "pull_std": float(pulls.std(ddof=1)),
-                "coverage_68": coverage,
-                "coverage_68_low": coverage_center - coverage_half_width,
-                "coverage_68_high": coverage_center + coverage_half_width,
-                "pseudo_experiments": estimates.size,
-            }
-        )
+        center = (coverage + 0.5 / count) / denominator
+        half = np.sqrt(coverage * (1.0 - coverage) / count + 0.25 / count**2) / denominator
+        summaries.append({
+            "policy": policy, "C_true": C_true, "mean_C_hat": float(estimates.mean()),
+            "mean_C_hat_error": spread / np.sqrt(count), "bias": bias,
+            "normalized_bias": bias / spread if spread > 0.0 else None, "std_C_hat": spread,
+            "rmse": float(np.sqrt(bias**2 + spread**2)), "mean_reported_sigma": float(np.mean([row["sigma_C_hat"] for row in selected])),
+            "pull_mean": float(pulls.mean()), "pull_std": float(pulls.std(ddof=1)),
+            "coverage_68": coverage, "coverage_68_low": center - half, "coverage_68_high": center + half,
+            "pseudo_experiments": count,
+        })
     return summaries
 
 
 def evaluate_pipeline(
-    config: dict[str, Any], device: torch.device, policies: dict[str, torch.nn.Module] | None = None
+    config: dict[str, Any], device: torch.device, nominal: dict[str, torch.Tensor], policies: dict[str, ConditionalFlow],
+    score_model: ScoreModel, histories: dict[str, list[dict[str, float]]], fisher_validation: dict[str, Any], output: Path,
 ) -> list[dict[str, Any]]:
-    output, _ = _paths(config)
-    _save_config(config, output)
-    policies = policies or load_policies(config, device)
-    features, truth = _nominal_sample(config, device)
-    _, _, response_data = _split_nominal(features, truth, config)
-    response_features, response_truth = response_data
-    sigma = float(config["model"]["policy_sigma"])
-    base_seed = int(config["seed"])
-    events = int(config["data"]["events_per_pseudo_experiment"])
-    experiments = int(config["data"]["pseudo_experiments"])
-    pseudo_batch = int(config["data"]["pseudo_batch_size"])
+    _, _, calibration_events = _split_nominal(nominal, config)
+    calibrations = {
+        name: make_reference_reconstruction(policy, score_model, calibration_events, config, int(config["seed"]) + 50000)
+        for name, policy in policies.items()
+    }
     rows: list[dict[str, Any]] = []
-    calibrations: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
-
+    experiments = int(config["data"]["pseudo_experiments"])
+    events_per = int(config["data"]["events_per_pseudo_experiment"])
     total = len(policies) * len(config["physics"]["true_C_values"]) * experiments
-    progress = tqdm(total=total, desc="closure pseudo-experiments", unit="toy")
+    progress = tqdm(total=total, desc="off-nominal closure", unit="toy")
     for policy_index, (name, policy) in enumerate(policies.items()):
-        calibration_generator = make_generator(device, base_seed + 1000 + policy_index)
-        calibration = _calibration_for_policy(
-            policy, response_features, response_truth, config, calibration_generator
-        )
-        calibrations[name] = calibration
-        for truth_index, C_true_value in enumerate(config["physics"]["true_C_values"]):
-            C_true = float(C_true_value)
-            generator = make_generator(device, base_seed + 100000 * (policy_index + 1) + 1000 * truth_index)
-            for start in range(0, experiments, pseudo_batch):
-                batch_count = min(pseudo_batch, experiments - start)
-                batch_truth = sample_truth(batch_count * events, C_true, device, generator)
-                batch_features = detector_features(batch_truth, config["physics"], generator)
-                batch_reco = reconstruct(policy, batch_features, sigma, generator).reshape(batch_count, events).cpu().numpy()
-                for offset, reco in enumerate(batch_reco):
-                    estimate, lower_error, upper_error = _evaluate_pseudo_dataset(reco, calibration, config)
-                    symmetric_error = 0.5 * (lower_error + upper_error)
-                    rows.append(
-                        {
-                            "inference_method": "poisson_forward_folding",
-                            "policy": name,
-                            "C_true": C_true,
-                            "pseudo_experiment": start + offset,
-                            "C_hat": estimate,
-                            "sigma_minus": lower_error,
-                            "sigma_plus": upper_error,
-                            "sigma_C_hat": symmetric_error,
-                            "pull": (estimate - C_true) / symmetric_error if symmetric_error > 0.0 else np.nan,
-                            "covered_68": estimate - lower_error <= C_true <= estimate + upper_error,
-                        }
-                    )
-                progress.update(batch_count)
+        for truth_index, value in enumerate(config["physics"]["true_C_values"]):
+            C_true = float(value)
+            for experiment in range(experiments):
+                generator = make_generator(device, int(config["seed"]) + 100000 * (policy_index + 1) + 1000 * truth_index + experiment)
+                pseudo = generate_events(events_per, C_true, config, device, generator)
+                reconstructed = reconstruct_policy(policy, pseudo, config, generator)
+                estimate, lower, upper, _ = _fit_reconstructed(reconstructed, calibration_events, calibrations[name], config)
+                sigma = 0.5 * (lower + upper)
+                rows.append({
+                    "policy": name, "C_true": C_true, "pseudo_experiment": experiment,
+                    "C_hat": estimate, "sigma_minus": lower, "sigma_plus": upper, "sigma_C_hat": sigma,
+                    "pull": (estimate - C_true) / sigma if sigma > 0.0 else np.nan,
+                    "covered_68": estimate - lower <= C_true <= estimate + upper,
+                    "valid_fraction": float(reconstructed["valid"].float().mean()),
+                })
+                progress.update()
                 progress.set_postfix(policy=name, C_true=f"{C_true:.2f}")
     progress.close()
-
     summaries = _summarize(rows)
-    _write_rows(output / "pseudo_experiments.csv", rows)
-    _write_rows(output / "summary.csv", summaries)
+    for path, data in ((output / "pseudo_experiments.csv", rows), (output / "summary.csv", summaries)):
+        with path.open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(data[0]))
+            writer.writeheader()
+            writer.writerows(data)
     with (output / "summary.json").open("w", encoding="utf-8") as stream:
         json.dump(summaries, stream, indent=2)
-    make_diagnostics(policies, calibrations, config, device, output)
-    make_plots(rows, summaries, config, output)
+    from .plots import make_all_plots
+    make_all_plots(nominal, calibration_events, policies, score_model, calibrations, histories, fisher_validation, summaries, config, device, output)
     return summaries
-
-
-def _policy_label(name: str) -> str:
-    return name.replace("_", " ").title().replace("Dgpo", "DGPO")
-
-
-def make_plots(
-    rows: list[dict[str, Any]], summaries: list[dict[str, Any]], config: dict[str, Any], output: Path
-) -> None:
-    dpi = int(config["plots"]["dpi"])
-    policies = list(dict.fromkeys(str(row["policy"]) for row in rows))
-    colors = dict(zip(policies, plt.get_cmap("tab10").colors))
-    C_values = np.array(sorted({float(row["C_true"]) for row in rows}))
-
-    fig, axis = plt.subplots(figsize=(6.4, 5.2))
-    for policy in policies:
-        selected = sorted((row for row in summaries if row["policy"] == policy), key=lambda row: row["C_true"])
-        axis.errorbar(
-            [row["C_true"] for row in selected],
-            [row["mean_C_hat"] for row in selected],
-            yerr=[row["mean_C_hat_error"] for row in selected],
-            marker="o",
-            capsize=3,
-            label=_policy_label(policy),
-            color=colors[policy],
-        )
-    axis.plot(C_values, C_values, "--", color="black", label="Identity")
-    axis.set(xlabel=r"$C_{\mathrm{true}}$", ylabel=r"$E[\hat C]$")
-    axis.legend(frameon=False)
-    fig.tight_layout()
-    fig.savefig(output / "12_bias_linearity.png", dpi=dpi)
-    plt.close(fig)
-
-    fig, axes = plt.subplots(2, 1, figsize=(6.4, 7.0), sharex=True)
-    for policy in policies:
-        selected = sorted((row for row in summaries if row["policy"] == policy), key=lambda row: row["C_true"])
-        axes[0].plot(C_values, [row["bias"] for row in selected], marker="o", label=_policy_label(policy), color=colors[policy])
-        normalized = [np.nan if row["normalized_bias"] is None else row["normalized_bias"] for row in selected]
-        axes[1].plot(C_values, normalized, marker="o", color=colors[policy])
-    axes[0].axhline(0.0, color="black", linestyle="--")
-    axes[1].axhline(0.0, color="black", linestyle="--")
-    axes[0].set_ylabel(r"$E[\hat C]-C_{\mathrm{true}}$")
-    axes[1].set(xlabel=r"$C_{\mathrm{true}}$", ylabel="Normalized bias")
-    axes[0].legend(frameon=False)
-    fig.tight_layout()
-    fig.savefig(output / "13_bias_vs_Ctrue.png", dpi=dpi)
-    plt.close(fig)
-
-    fig, axes = plt.subplots(1, len(C_values), figsize=(3.4 * len(C_values), 3.4), sharey=True, squeeze=False)
-    pull_range = tuple(float(value) for value in config["plots"]["pull_range"])
-    bins = np.linspace(pull_range[0], pull_range[1], int(config["plots"]["pull_bins"]) + 1)
-    for axis, C_true in zip(axes[0], C_values):
-        for policy in policies:
-            pulls = np.array([row["pull"] for row in rows if row["policy"] == policy and row["C_true"] == C_true])
-            finite = pulls[np.isfinite(pulls)]
-            label = (
-                f"{_policy_label(policy)}\n$\\mu={np.mean(finite):.2f}$, $\\sigma={np.std(finite, ddof=1):.2f}$"
-                if finite.size > 1
-                else f"{_policy_label(policy)}\nPull unavailable"
-            )
-            visible = finite[(finite >= bins[0]) & (finite <= bins[-1])]
-            if visible.size:
-                axis.hist(visible, bins=bins, histtype="step", density=True, linewidth=1.5, label=label, color=colors[policy])
-            else:
-                axis.plot([], [], color=colors[policy], label=label)
-        axis.axvline(0.0, color="black", linestyle="--", linewidth=1)
-        axis.set_title(rf"$C_{{\mathrm{{true}}}}={C_true:.2f}$")
-        axis.set_xlabel("Pull")
-        axis.legend(frameon=False, fontsize=7)
-    axes[0, 0].set_ylabel("Density")
-    fig.tight_layout()
-    fig.savefig(output / "14_pull_distributions.png", dpi=dpi)
-    plt.close(fig)
-
-    fig, axis = plt.subplots(figsize=(6.4, 5.2))
-    for policy in policies:
-        selected = sorted((row for row in summaries if row["policy"] == policy), key=lambda row: row["C_true"])
-        coverage = np.array([row["coverage_68"] for row in selected])
-        lower = coverage - np.array([row["coverage_68_low"] for row in selected])
-        upper = np.array([row["coverage_68_high"] for row in selected]) - coverage
-        axis.errorbar(C_values, coverage, yerr=np.vstack((lower, upper)), marker="o", capsize=3, label=_policy_label(policy), color=colors[policy])
-    axis.axhline(0.68, color="black", linestyle="--", label="68% reference")
-    axis.set(xlabel=r"$C_{\mathrm{true}}$", ylabel="Empirical 68% coverage", ylim=(0.0, 1.0))
-    axis.legend(frameon=False)
-    fig.tight_layout()
-    fig.savefig(output / "15_coverage_vs_Ctrue.png", dpi=dpi)
-    plt.close(fig)
-
-    representatives = [float(value) for value in config["plots"]["representative_C_values"]]
-    fig, axes = plt.subplots(1, len(representatives), figsize=(6.0 * len(representatives), 4.0), squeeze=False)
-    estimate_bins = int(config["plots"]["estimate_bins"])
-    nominal_C = float(config["physics"]["nominal_C"])
-    for axis, C_true in zip(axes[0], representatives):
-        for policy in policies:
-            estimates = [row["C_hat"] for row in rows if row["policy"] == policy and row["C_true"] == C_true]
-            axis.hist(estimates, bins=estimate_bins, histtype="step", density=True, linewidth=1.5, label=_policy_label(policy), color=colors[policy])
-        axis.axvline(C_true, color="black", linewidth=1.5, label=r"$C_{\mathrm{true}}$")
-        axis.axvline(nominal_C, color="black", linestyle="--", linewidth=1.5, label=r"Nominal $C_0$")
-        axis.set(xlabel=r"$\hat C$", ylabel="Density", title=rf"$C_{{\mathrm{{true}}}}={C_true:.2f}$")
-        axis.legend(frameon=False)
-    fig.tight_layout()
-    fig.savefig(output / "16_C_hat_offnominal.png", dpi=dpi)
-    plt.close(fig)
 
 
 def run(config_path: str | Path, mode: str, device_override: str | None, output_override: str | None) -> None:
@@ -378,15 +259,27 @@ def run(config_path: str | Path, mode: str, device_override: str | None, output_
         config["output_dir"] = output_override
     seed_everything(int(config["seed"]))
     device = resolve_device(str(config.get("device", "auto")))
+    output, checkpoints = _paths(config)
+    with (output / "resolved_config.yaml").open("w", encoding="utf-8") as stream:
+        yaml.safe_dump(config, stream, sort_keys=False)
     print(f"Using device: {device}", flush=True)
-    policies = train_pipeline(config, device) if mode in {"run", "train"} else None
+    nominal = _nominal_events(config, device)
+    if mode in {"run", "train"}:
+        policies, score_model, histories, fisher_validation, _ = train_pipeline(config, device, nominal, output, checkpoints)
+    else:
+        policies, score_model = _load_models(config, device, checkpoints)
+        histories = {}
+        for name in policies:
+            path = output / f"training_{name}.csv"
+            if path.exists():
+                with path.open(encoding="utf-8") as stream:
+                    histories[name] = [{key: float(value) for key, value in row.items()} for row in csv.DictReader(stream)]
+        _, _, calibration_events = _split_nominal(nominal, config)
+        fisher_validation, _ = validate_reference_fisher(policies["baseline"], score_model, calibration_events, config, device, output)
+        if not fisher_validation["passed"]:
+            raise RuntimeError("Pre-DGPO Fisher closure failed during evaluation")
     if mode in {"run", "evaluate"}:
-        summaries = evaluate_pipeline(config, device, policies)
-        print(f"Results written to {Path(config['output_dir']).expanduser().resolve()}", flush=True)
+        summaries = evaluate_pipeline(config, device, nominal, policies, score_model, histories, fisher_validation, output)
+        print(f"Results written to {output}", flush=True)
         for row in summaries:
-            print(
-                f"{row['policy']:>24s} C_true={row['C_true']:.2f}: "
-                f"ensemble mean={row['mean_C_hat']:.4f}, ensemble std={row['std_C_hat']:.4f}, "
-                f"bias={row['bias']:+.4f}, coverage={row['coverage_68']:.3f}",
-                flush=True,
-            )
+            print(f"{row['policy']:>24s} C_true={row['C_true']:.2f}: mean={row['mean_C_hat']:.4f}, std={row['std_C_hat']:.4f}, bias={row['bias']:+.4f}, coverage={row['coverage_68']:.3f}", flush=True)

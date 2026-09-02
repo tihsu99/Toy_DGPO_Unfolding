@@ -1,44 +1,37 @@
-# Toy DGPO unfolding
+# Z-to-tau-tau DGPO reconstruction toy
 
-GPU-capable toy pipeline for testing whether reconstruction optimized at one nominal physics point remains calibrated away from it. The default configuration uses only one nominal calibration sample at `C0 = 0.60`, trains a baseline and two DGPO variants, then evaluates independent pseudo-data at `C_true = 0.20, 0.40, 0.60, 0.80, 0.90`.
+This repository implements a GPU-capable closure study for choosing among ambiguous invisible reconstructions in a minimal `Z -> tau tau` event model. The policy never receives truth `x`, truth `C`, or the true tau direction. It sees only the two smeared visible four-momenta and samples a two-dimensional tangent-plane action that defines a candidate tau axis.
 
-The final parameter estimate uses the required reconstructed-level Poisson forward-folding likelihood:
+The implemented chain is:
 
-1. Reconstruct the nominal response split with each frozen policy.
-2. Build every reconstructed template from that same nominal paired sample using
-   `w(C) = (1 + C*x) / (1 + C0*x)`.
-3. Fit each off-nominal pseudo-dataset with the binned Poisson deviance.
-4. Quote asymmetric 68% errors from `Delta(-2 log L) = 1`, and validate them with pulls and empirical coverage.
+1. Sample `(c_A, c_B)` from `p(c_A,c_B|C) = (1 + C c_A c_B)/4`.
+2. Generate the visible and invisible tau-decay systems and verify four-momentum closure.
+3. Smear the two visible four-momenta and construct an observed seed direction.
+4. Train a conditional normalizing flow on the exact sphere-log-map target at nominal `C0 = 0.60`.
+5. Reconstruct `y = c_A,reco c_B,reco` explicitly from each candidate tau four-momentum.
+6. Train and freeze `s_ref(y) = E[t(X)|Y=y]`, where `t(x)=x/(1+C0 x)`.
+7. Require pre-DGPO agreement among score Fisher, fine-binned Poisson Fisher, and nominal pseudo-experiment width.
+8. Optimize candidate preferences with the exact event-replacement Fisher reward and, for the trusted policy, `KL(q_phi || q_ref)`.
+9. Fit independent off-nominal pseudo-data with nominal-only, analytically reweighted, reconstructed-level Poisson templates.
 
-Iterative Bayesian (D'Agostini) unfolding is retained as an explicit diagnostic. The output compares the generated truth spectrum, nominal prior, and unfolded spectrum, but unfolding no longer supplies the final parameter estimate.
+The final parameter estimate and its asymmetric 68% interval come from the Poisson forward-folding likelihood and `Delta(-2 log L)=1`. The pipeline deliberately stops before DGPO if the pre-training Fisher closure gate fails.
 
-The reconstructed-score estimator is not frozen at the baseline policy. Each DGPO epoch re-estimates `E[s0(x) | y]` on the independent nominal score split for the current policy before applying the group policy update. A truth-bin conditional-calibration loss constrains reconstruction bias without training on off-nominal pseudo-data.
-
-No off-nominal sample is used for training, response calibration, priors, or fit templates. Off-nominal events are generated only as blind pseudo-data.
-
-## Install
-
-Create an environment on the GPU host and install the package. Install the PyTorch build appropriate for that host first if its CUDA stack requires a site-specific wheel.
+## Install and check the GPU
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install --upgrade pip
 python3 -m pip install -e .
-```
-
-Confirm that PyTorch sees the GPU:
-
-```bash
 python3 -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no CUDA GPU')"
 ```
 
 ## Run over SSH
 
-All experiment controls are in [`config/default.yaml`](config/default.yaml). For a long run, use `tmux`:
+All physics, detector, flow, DGPO, inference, and plotting controls are in [`config/default.yaml`](config/default.yaml).
 
 ```bash
-tmux new -s toy-dgpo
+tmux new -s ztautau-dgpo
 source .venv/bin/activate
 toy-dgpo run --config config/default.yaml --device cuda
 ```
@@ -46,42 +39,39 @@ toy-dgpo run --config config/default.yaml --device cuda
 Detach with `Ctrl-b d` and reconnect with:
 
 ```bash
-tmux attach -t toy-dgpo
+tmux attach -t ztautau-dgpo
 ```
 
-The terminal shows progress bars for baseline training, score calibration, each DGPO policy, and the full closure ensemble. To preserve work across separate batch allocations, train and evaluate independently:
+Training and evaluation can be split across allocations:
 
 ```bash
 toy-dgpo train --config config/default.yaml --device cuda
 toy-dgpo evaluate --config config/default.yaml --device cuda
 ```
 
-Both commands must use the same configuration and output directory. `evaluate` loads checkpoints from `<output_dir>/checkpoints/`.
+The terminal reports progress for baseline flow MLE, frozen score regression, the pre-DGPO closure toys, each DGPO policy, and all off-nominal pseudo-experiments.
 
 ## Outputs
 
-The default output directory is `outputs/default/` and contains:
+The output directory contains the resolved YAML, versioned checkpoints, Fisher gate result, per-toy results, summaries, and:
 
-- `resolved_config.yaml`: exact configuration used;
-- `checkpoints/`: each policy and its corresponding reconstructed-score model;
-- `pseudo_experiments.csv`: one forward-folded estimate and asymmetric interval per toy;
-- `summary.csv` and `summary.json`: bias, normalized bias, precision, RMSE, pulls, and coverage;
-- `policy_diagnostics.csv`: reconstruction correlation/MSE, response effective rank, singular values, and reconstructed Fisher information;
-- `00_truth_generation.png`: generated truth distributions against the analytic density;
-- `01_reco_vs_truth.png`: reconstructed output versus generated truth for every policy;
-- `02_z_distributions.png`: all detector features at every tested `C`;
-- `03_response_matrices.png` and `04_response_singular_values.png`: response and conditioning diagnostics;
-- `05_unfolding_diagnostics.png`: generated truth, nominal prior, and D'Agostini unfolding;
-- `06_forward_likelihood_scans.png`: representative Poisson likelihood scans;
-- `12_bias_linearity.png` through `16_C_hat_offnominal.png`: the mandatory closure figures.
+- `00_truth_physics.png`
+- `01_invisible_kinematics.png`
+- `01b_observed_z_by_C.png`
+- `02_baseline_reconstruction.png`
+- `03_score_fisher_closure.png`
+- `04_candidate_event_display.png`
+- `05_training.png`
+- `06_response_before_after.png`
+- `07_offnominal_closure.png`
+- `08_final_dashboard.png`
 
-The likelihood currently treats the nominal reconstructed templates as exact. It therefore does not include finite nominal-response/template MC uncertainty; increase `data.nominal_events` until that contribution is negligible, or add it as a separate nuisance/systematic study.
+`config/smoke.yaml` is a software-path test only. Its small ensemble cannot establish scientific coverage.
 
 ## Validation
 
 ```bash
-python3 -m unittest discover -s tests
-toy-dgpo run --config config/smoke.yaml
+source .venv/bin/activate
+python -m unittest discover -s tests -v
+toy-dgpo run --config config/smoke.yaml --device cpu
 ```
-
-The smoke configuration is only a software check; three pseudo-experiments are not a scientific closure result.
