@@ -32,22 +32,32 @@ training:
   weight_decay: 0.00001
   group_size: 4
   policy_updates: 2
+  score_refresh_epochs: 1
+  score_refresh_interval: 1
   clip_epsilon: 0.20
   anchor_strength: 1.0
   bias_penalty: 2.0
+  conditional_calibration_bins: 8
+  conditional_calibration_strength: 10.0
+  bias_controlled_calibration_multiplier: 2.0
   grad_clip_norm: 5.0
 
 unfolding:
   truth_bins: 8
   reco_bins: 8
   iterations: 4
-  covariance_rcond: 1.0e-8
   scan_points: 101
 
 policies:
   baseline: true
   fisher_dgpo: true
   bias_controlled_dgpo: true
+
+diagnostics:
+  events_per_C: 2000
+  truth_hist_bins: 30
+  reco_vs_truth_bins: 30
+  response_rank_rcond: 1.0e-3
 
 plots:
   dpi: 80

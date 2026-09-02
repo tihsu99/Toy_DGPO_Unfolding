@@ -2,14 +2,17 @@
 
 GPU-capable toy pipeline for testing whether reconstruction optimized at one nominal physics point remains calibrated away from it. The default configuration uses only one nominal calibration sample at `C0 = 0.60`, trains a baseline and two DGPO variants, then evaluates independent pseudo-data at `C_true = 0.20, 0.40, 0.60, 0.80, 0.90`.
 
-The final parameter estimate is based on iterative Bayesian (D'Agostini) unfolding:
+The final parameter estimate uses the required reconstructed-level Poisson forward-folding likelihood:
 
-1. Build `P(reco bin | truth bin)` from the nominal response split only.
-2. Unfold every pseudo-dataset for the configured number of iterations.
-3. Propagate Poisson data fluctuations through the unfolding with a numerical Jacobian, retaining the full truth-bin covariance.
-4. Fit the unfolded truth spectrum to nominal-MC templates reweighted exactly by
+1. Reconstruct the nominal response split with each frozen policy.
+2. Build every reconstructed template from that same nominal paired sample using
    `w(C) = (1 + C*x) / (1 + C0*x)`.
-5. Quote asymmetric 68% errors from `Delta chi2 = 1`, and validate them with pulls and empirical coverage.
+3. Fit each off-nominal pseudo-dataset with the binned Poisson deviance.
+4. Quote asymmetric 68% errors from `Delta(-2 log L) = 1`, and validate them with pulls and empirical coverage.
+
+Iterative Bayesian (D'Agostini) unfolding is retained as an explicit diagnostic. The output compares the generated truth spectrum, nominal prior, and unfolded spectrum, but unfolding no longer supplies the final parameter estimate.
+
+The reconstructed-score estimator is not frozen at the baseline policy. Each DGPO epoch re-estimates `E[s0(x) | y]` on the independent nominal score split for the current policy before applying the group policy update. A truth-bin conditional-calibration loss constrains reconstruction bias without training on off-nominal pseudo-data.
 
 No off-nominal sample is used for training, response calibration, priors, or fit templates. Off-nominal events are generated only as blind pseudo-data.
 
@@ -60,12 +63,19 @@ Both commands must use the same configuration and output directory. `evaluate` l
 The default output directory is `outputs/default/` and contains:
 
 - `resolved_config.yaml`: exact configuration used;
-- `checkpoints/`: baseline, score-model, Fisher-DGPO, and bias-controlled-DGPO weights;
-- `pseudo_experiments.csv`: one unfolded estimate and asymmetric interval per toy;
+- `checkpoints/`: each policy and its corresponding reconstructed-score model;
+- `pseudo_experiments.csv`: one forward-folded estimate and asymmetric interval per toy;
 - `summary.csv` and `summary.json`: bias, normalized bias, precision, RMSE, pulls, and coverage;
+- `policy_diagnostics.csv`: reconstruction correlation/MSE, response effective rank, singular values, and reconstructed Fisher information;
+- `00_truth_generation.png`: generated truth distributions against the analytic density;
+- `01_reco_vs_truth.png`: reconstructed output versus generated truth for every policy;
+- `02_z_distributions.png`: all detector features at every tested `C`;
+- `03_response_matrices.png` and `04_response_singular_values.png`: response and conditioning diagnostics;
+- `05_unfolding_diagnostics.png`: generated truth, nominal prior, and D'Agostini unfolding;
+- `06_forward_likelihood_scans.png`: representative Poisson likelihood scans;
 - `12_bias_linearity.png` through `16_C_hat_offnominal.png`: the mandatory closure figures.
 
-The reported unfolding covariance contains pseudo-data counting uncertainty. It does not include finite nominal-response MC uncertainty; increase `data.nominal_events` until that contribution is negligible, or treat it as a separate systematic study.
+The likelihood currently treats the nominal reconstructed templates as exact. It therefore does not include finite nominal-response/template MC uncertainty; increase `data.nominal_events` until that contribution is negligible, or add it as a separate nuisance/systematic study.
 
 ## Validation
 

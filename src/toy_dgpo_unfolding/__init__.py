@@ -1,4 +1,3 @@
-"""Toy DGPO reconstruction and Bayesian-unfolding closure study."""
+"""Toy DGPO reconstruction and forward-folding closure study."""
 
-__version__ = "0.1.0"
-
+__version__ = "0.2.0"

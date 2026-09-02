@@ -19,14 +19,18 @@ from .core import (
     load_config,
     make_generator,
     make_policy,
-    make_score_model,
     reconstruct,
     resolve_device,
     sample_truth,
     seed_everything,
 )
 from .training import train_baseline, train_dgpo, train_score_model
-from .unfolding import fit_parameter, response_matrix, reweighted_truth_templates, unfolding_covariance
+from .diagnostics import make_diagnostics
+from .unfolding import (
+    fit_poisson_parameter,
+    response_matrix,
+    reweighted_reco_templates,
+)
 
 
 def _paths(config: dict[str, Any]) -> tuple[Path, Path]:
@@ -77,14 +81,22 @@ def train_pipeline(config: dict[str, Any], device: torch.device) -> dict[str, to
     baseline = train_baseline(*train_data, config, device)
     score_model = train_score_model(baseline, *score_data, config, device)
     policies: dict[str, torch.nn.Module] = {"baseline": baseline}
+    policy_scores: dict[str, torch.nn.Module] = {"baseline": score_model}
     if bool(config["policies"].get("fisher_dgpo", False)):
-        policies["fisher_dgpo"] = train_dgpo(baseline, score_model, *train_data, config, device, False)
+        policies["fisher_dgpo"], policy_scores["fisher_dgpo"] = train_dgpo(
+            baseline, score_model, *train_data, *score_data, config, device, False
+        )
     if bool(config["policies"].get("bias_controlled_dgpo", False)):
-        policies["bias_controlled_dgpo"] = train_dgpo(baseline, score_model, *train_data, config, device, True)
+        policies["bias_controlled_dgpo"], policy_scores["bias_controlled_dgpo"] = train_dgpo(
+            baseline, score_model, *train_data, *score_data, config, device, True
+        )
 
-    torch.save(score_model.state_dict(), checkpoints / "score_model.pt")
     for name, policy in policies.items():
-        torch.save(policy.state_dict(), checkpoints / f"{name}.pt")
+        torch.save({"method_version": 2, "state_dict": policy.state_dict()}, checkpoints / f"{name}.pt")
+        torch.save(
+            {"method_version": 2, "state_dict": policy_scores[name].state_dict()},
+            checkpoints / f"{name}_score.pt",
+        )
     return policies
 
 
@@ -98,8 +110,11 @@ def load_policies(config: dict[str, Any], device: torch.device) -> dict[str, tor
         path = checkpoints / f"{name}.pt"
         if not path.exists():
             raise FileNotFoundError(f"Missing checkpoint {path}; run the train command first")
+        payload = torch.load(path, map_location=device, weights_only=True)
+        if not isinstance(payload, dict) or payload.get("method_version") != 2:
+            raise RuntimeError(f"Checkpoint {path} predates the current-score DGPO method; run the train command again")
         model = make_policy(config).to(device)
-        model.load_state_dict(torch.load(path, map_location=device, weights_only=True))
+        model.load_state_dict(payload["state_dict"])
         policies[name] = model.eval()
     return policies
 
@@ -110,7 +125,7 @@ def _calibration_for_policy(
     response_truth: torch.Tensor,
     config: dict[str, Any],
     generator: torch.Generator,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     unfolding = config["unfolding"]
     sigma = float(config["model"]["policy_sigma"])
     reco = reconstruct(policy, response_features, sigma, generator).cpu().numpy()
@@ -118,35 +133,28 @@ def _calibration_for_policy(
     truth_edges = np.linspace(-1.0, 1.0, int(unfolding["truth_bins"]) + 1)
     reco_edges = np.linspace(-1.0, 1.0, int(unfolding["reco_bins"]) + 1)
     response, prior = response_matrix(truth, reco, truth_edges, reco_edges)
-    return truth, truth_edges, reco_edges, response, prior
+    return truth, reco, truth_edges, reco_edges, response, prior
 
 
 def _evaluate_pseudo_dataset(
     reco: np.ndarray,
-    calibration: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    calibration: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
     config: dict[str, Any],
 ) -> tuple[float, float, float]:
-    nominal_truth, truth_edges, reco_edges, response, prior = calibration
+    nominal_truth, nominal_reco, _, reco_edges, _, _ = calibration
     counts, _ = np.histogram(reco, bins=reco_edges)
     settings = config["unfolding"]
-    unfolded, covariance = unfolding_covariance(
-        counts.astype(float),
-        response,
-        prior,
-        int(settings["iterations"]),
-    )
     bounds = config["physics"]["physical_C_range"]
     scan = np.linspace(float(bounds[0]), float(bounds[1]), int(settings["scan_points"]))
-    templates = reweighted_truth_templates(
+    templates = reweighted_reco_templates(
         nominal_truth,
-        truth_edges,
+        nominal_reco,
+        reco_edges,
         float(config["physics"]["nominal_C"]),
         scan,
-        float(unfolded.sum()),
+        float(counts.sum()),
     )
-    estimate, lower_error, upper_error, _ = fit_parameter(
-        unfolded, covariance, templates, scan, float(settings["covariance_rcond"])
-    )
+    estimate, lower_error, upper_error, _ = fit_poisson_parameter(counts, templates, scan)
     return estimate, lower_error, upper_error
 
 
@@ -167,8 +175,14 @@ def _summarize(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         bias = float(estimates.mean() - C_true)
         standard_deviation = float(estimates.std(ddof=1))
         normalized_bias = bias / standard_deviation if standard_deviation > 0.0 else None
+        coverage = float(np.mean([bool(row["covered_68"]) for row in selected]))
+        count = estimates.size
+        denominator = 1.0 + 1.0 / count
+        coverage_center = (coverage + 0.5 / count) / denominator
+        coverage_half_width = np.sqrt(coverage * (1.0 - coverage) / count + 0.25 / count**2) / denominator
         summaries.append(
             {
+                "inference_method": "poisson_forward_folding",
                 "policy": policy,
                 "C_true": C_true,
                 "mean_C_hat": float(estimates.mean()),
@@ -180,7 +194,9 @@ def _summarize(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "mean_reported_sigma": float(np.mean([float(row["sigma_C_hat"]) for row in selected])),
                 "pull_mean": float(pulls.mean()),
                 "pull_std": float(pulls.std(ddof=1)),
-                "coverage_68": float(np.mean([bool(row["covered_68"]) for row in selected])),
+                "coverage_68": coverage,
+                "coverage_68_low": coverage_center - coverage_half_width,
+                "coverage_68_high": coverage_center + coverage_half_width,
                 "pseudo_experiments": estimates.size,
             }
         )
@@ -202,6 +218,7 @@ def evaluate_pipeline(
     experiments = int(config["data"]["pseudo_experiments"])
     pseudo_batch = int(config["data"]["pseudo_batch_size"])
     rows: list[dict[str, Any]] = []
+    calibrations: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
 
     total = len(policies) * len(config["physics"]["true_C_values"]) * experiments
     progress = tqdm(total=total, desc="closure pseudo-experiments", unit="toy")
@@ -210,6 +227,7 @@ def evaluate_pipeline(
         calibration = _calibration_for_policy(
             policy, response_features, response_truth, config, calibration_generator
         )
+        calibrations[name] = calibration
         for truth_index, C_true_value in enumerate(config["physics"]["true_C_values"]):
             C_true = float(C_true_value)
             generator = make_generator(device, base_seed + 100000 * (policy_index + 1) + 1000 * truth_index)
@@ -223,6 +241,7 @@ def evaluate_pipeline(
                     symmetric_error = 0.5 * (lower_error + upper_error)
                     rows.append(
                         {
+                            "inference_method": "poisson_forward_folding",
                             "policy": name,
                             "C_true": C_true,
                             "pseudo_experiment": start + offset,
@@ -243,6 +262,7 @@ def evaluate_pipeline(
     _write_rows(output / "summary.csv", summaries)
     with (output / "summary.json").open("w", encoding="utf-8") as stream:
         json.dump(summaries, stream, indent=2)
+    make_diagnostics(policies, calibrations, config, device, output)
     make_plots(rows, summaries, config, output)
     return summaries
 
@@ -323,9 +343,9 @@ def make_plots(
     for policy in policies:
         selected = sorted((row for row in summaries if row["policy"] == policy), key=lambda row: row["C_true"])
         coverage = np.array([row["coverage_68"] for row in selected])
-        count = np.array([row["pseudo_experiments"] for row in selected])
-        uncertainty = np.sqrt(coverage * (1.0 - coverage) / count)
-        axis.errorbar(C_values, coverage, yerr=uncertainty, marker="o", capsize=3, label=_policy_label(policy), color=colors[policy])
+        lower = coverage - np.array([row["coverage_68_low"] for row in selected])
+        upper = np.array([row["coverage_68_high"] for row in selected]) - coverage
+        axis.errorbar(C_values, coverage, yerr=np.vstack((lower, upper)), marker="o", capsize=3, label=_policy_label(policy), color=colors[policy])
     axis.axhline(0.68, color="black", linestyle="--", label="68% reference")
     axis.set(xlabel=r"$C_{\mathrm{true}}$", ylabel="Empirical 68% coverage", ylim=(0.0, 1.0))
     axis.legend(frameon=False)
@@ -366,7 +386,7 @@ def run(config_path: str | Path, mode: str, device_override: str | None, output_
         for row in summaries:
             print(
                 f"{row['policy']:>24s} C_true={row['C_true']:.2f}: "
-                f"C_hat={row['mean_C_hat']:.4f} +/- {row['std_C_hat']:.4f}, "
+                f"ensemble mean={row['mean_C_hat']:.4f}, ensemble std={row['std_C_hat']:.4f}, "
                 f"bias={row['bias']:+.4f}, coverage={row['coverage_68']:.3f}",
                 flush=True,
             )

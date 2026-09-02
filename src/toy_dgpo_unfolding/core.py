@@ -16,10 +16,18 @@ def load_config(path: str | Path) -> dict[str, Any]:
         config = yaml.safe_load(stream)
     if not isinstance(config, dict):
         raise ValueError("Configuration root must be a mapping")
-    required = {"physics", "data", "model", "training", "unfolding", "policies", "plots"}
+    required = {"physics", "data", "model", "training", "unfolding", "policies", "diagnostics", "plots"}
     missing = required.difference(config)
     if missing:
         raise ValueError(f"Missing configuration sections: {sorted(missing)}")
+    if float(config["model"]["policy_sigma"]) <= 0.0:
+        raise ValueError("model.policy_sigma must be positive")
+    if int(config["training"]["group_size"]) < 2:
+        raise ValueError("training.group_size must be at least two")
+    if int(config["training"]["score_refresh_interval"]) < 1:
+        raise ValueError("training.score_refresh_interval must be positive")
+    if int(config["unfolding"]["scan_points"]) < 3:
+        raise ValueError("unfolding.scan_points must be at least three")
     return config
 
 
@@ -111,6 +119,14 @@ def clone_model(model: nn.Module) -> nn.Module:
     return copy.deepcopy(model)
 
 
+def bounded_to_latent(mean: torch.Tensor) -> torch.Tensor:
+    return torch.atanh(mean.clamp(-1.0 + 1.0e-6, 1.0 - 1.0e-6))
+
+
+def sample_policy(mean: torch.Tensor, sigma: float, noise: torch.Tensor) -> torch.Tensor:
+    return torch.tanh(bounded_to_latent(mean) + sigma * noise)
+
+
 @torch.no_grad()
 def reconstruct(
     policy: nn.Module,
@@ -120,5 +136,6 @@ def reconstruct(
 ) -> torch.Tensor:
     mean = policy(features)
     if sigma > 0.0:
-        mean = mean + sigma * torch.randn(mean.shape, device=mean.device, generator=generator)
-    return mean.clamp(-1.0, 1.0)
+        noise = torch.randn(mean.shape, device=mean.device, generator=generator)
+        return sample_policy(mean, sigma, noise)
+    return mean

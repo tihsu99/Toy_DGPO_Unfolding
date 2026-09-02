@@ -6,7 +6,7 @@ from .pipeline import run
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the toy DGPO Bayesian-unfolding closure pipeline")
+    parser = argparse.ArgumentParser(description="Run the toy DGPO forward-folding closure pipeline")
     subparsers = parser.add_subparsers(dest="mode", required=True)
     for mode in ("run", "train", "evaluate"):
         command = subparsers.add_parser(mode)
@@ -23,4 +23,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
