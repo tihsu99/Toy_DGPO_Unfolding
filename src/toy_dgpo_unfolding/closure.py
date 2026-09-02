@@ -22,6 +22,8 @@ def _label(name: str) -> str:
         "baseline": "Baseline",
         "fisher_dgpo_no_trust": "No trust",
         "fisher_dgpo_trust": "Trust",
+        "iterative_refresh_trust": "Iterative refresh trust",
+        "iterative_refresh_no_trust": "Iterative refresh no trust",
     }.get(name, name.replace("_", " ").title())
 
 
@@ -320,9 +322,12 @@ def run_statistical_closure(
     policies: dict[str, ConditionalFlow],
     output: Path,
 ) -> None:
-    names = [name for name in ("baseline", "fisher_dgpo_no_trust", "fisher_dgpo_trust") if name in policies]
-    if len(names) != 3:
-        raise RuntimeError("Statistical closure requires all three frozen policy checkpoints")
+    names = [name for name in (
+        "baseline", "fisher_dgpo_trust", "iterative_refresh_trust", "iterative_refresh_no_trust",
+        "fisher_dgpo_no_trust",
+    ) if name in policies]
+    if "baseline" not in names or len(names) < 2:
+        raise RuntimeError("Statistical closure requires the baseline and at least one optimized frozen policy")
     settings = config["closure"]
     total_events = int(settings["events"])
     if total_events <= 0 or int(settings["chunk_size"]) <= 0:

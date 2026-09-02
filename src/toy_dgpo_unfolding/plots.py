@@ -21,6 +21,8 @@ def _label(name: str) -> str:
         "baseline": "Baseline",
         "fisher_dgpo_no_trust": "Fisher DGPO, no trust",
         "fisher_dgpo_trust": "Fisher DGPO, trust",
+        "iterative_refresh_trust": "Iterative refresh, trust",
+        "iterative_refresh_no_trust": "Iterative refresh, no trust",
         "fisher_dgpo_trust_bias_control": "Fisher DGPO, trust + balance",
     }
     return labels.get(name, name.replace("_", " ").title())

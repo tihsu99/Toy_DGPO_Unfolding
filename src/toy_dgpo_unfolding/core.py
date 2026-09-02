@@ -17,13 +17,19 @@ def load_config(path: str | Path) -> dict[str, Any]:
         raise ValueError("Configuration root must be a mapping")
     required = {
         "physics", "detector", "data", "flow", "training", "fisher_validation",
-        "dgpo", "inference", "diagnosis", "closure", "policies", "plots",
+        "dgpo", "refresh", "inference", "diagnosis", "closure", "policies", "plots",
     }
     missing = required.difference(config)
     if missing:
         raise ValueError(f"Missing configuration sections: {sorted(missing)}")
     if int(config["dgpo"]["group_size"]) < 2:
         raise ValueError("dgpo.group_size must be at least two")
+    if int(config["refresh"]["rounds"]) < 1:
+        raise ValueError("refresh.rounds must be positive")
+    if int(config["refresh"]["dgpo_epochs_per_round"]) < 1:
+        raise ValueError("refresh.dgpo_epochs_per_round must be positive")
+    if int(config["refresh"]["direct_fisher_bins"]) < 2:
+        raise ValueError("refresh.direct_fisher_bins must be at least two")
     if not config["policies"].get("baseline", False):
         raise ValueError("policies.baseline must be enabled because it defines the frozen reference")
     if not 0.0 < float(config["physics"]["nominal_C"]) < 1.0:

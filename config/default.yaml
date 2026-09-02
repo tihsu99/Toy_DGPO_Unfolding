@@ -55,10 +55,24 @@ dgpo:
   no_trust_kl_coefficient: 0.0
   monitor_events: 20000
 
+refresh:
+  rounds: 6
+  dgpo_epochs_per_round: 5
+  score_events: 200000
+  fisher_events: 300000
+  score_epochs: 30
+  score_grid_points: 400
+  direct_fisher_bins: 80
+  beta_local: 0.10
+  beta_global: 0.0
+  output_subdir: refresh_study
+
 inference:
   reco_bins: 30
   scan_range: [-0.95, 0.95]
   scan_points: 381
+  calibration_events: 1000000
+  calibration_chunk_size: 100000
 
 diagnosis:
   nominal_events: 300000
@@ -83,8 +97,10 @@ closure:
 
 policies:
   baseline: true
-  fisher_dgpo_no_trust: true
+  fisher_dgpo_no_trust: false
   fisher_dgpo_trust: true
+  iterative_refresh_trust: true
+  iterative_refresh_no_trust: false
   fisher_dgpo_trust_bias_control: false
 
 plots:

@@ -15,7 +15,7 @@ from .flow import ConditionalFlow
 from .inference import binned_fisher_per_event, fit_poisson, reweighted_templates
 from .training import (
     make_flow, make_reference_reconstruction, reconstruct_policy, slice_events,
-    train_baseline, train_dgpo, train_reference_score,
+    train_baseline, train_dgpo, train_iterative_refresh, train_reference_score,
 )
 from .ztautau import generate_events
 
@@ -63,6 +63,84 @@ def _fit_reconstructed(
         edges, float(config["physics"]["nominal_C"]), _scan(config), float(reconstructed["y"].numel()),
     )
     return fit_poisson(observed, templates, _scan(config))
+
+
+def _fit_with_templates(
+    reconstructed: dict[str, torch.Tensor], templates: np.ndarray, config: dict[str, Any],
+) -> tuple[float, float, float, np.ndarray]:
+    edges = np.linspace(-1.0, 1.0, int(config["inference"]["reco_bins"]) + 1)
+    valid = reconstructed["valid"].cpu().numpy().astype(bool)
+    observed, _ = np.histogram(reconstructed["y"].cpu().numpy()[valid], bins=edges)
+    return fit_poisson(observed, templates, _scan(config))
+
+
+def _build_high_stat_templates(
+    config: dict[str, Any],
+    device: torch.device,
+    policies: dict[str, ConditionalFlow],
+    target_exposure: float,
+) -> tuple[dict[str, np.ndarray], dict[str, dict[str, float]]]:
+    settings = config["inference"]
+    total_events = int(settings["calibration_events"])
+    chunk_size = int(settings["calibration_chunk_size"])
+    if total_events <= 0 or chunk_size <= 0:
+        raise ValueError("inference calibration event counts must be positive")
+    nominal_C = float(config["physics"]["nominal_C"])
+    edges = np.linspace(-1.0, 1.0, int(settings["reco_bins"]) + 1)
+    fisher_edges = np.linspace(-1.0, 1.0, int(config["refresh"]["direct_fisher_bins"]) + 1)
+    bin_count = edges.size - 1
+    fisher_bin_count = fisher_edges.size - 1
+    counts = {name: np.zeros(bin_count) for name in policies}
+    derivatives = {name: np.zeros(bin_count) for name in policies}
+    fisher_counts = {name: np.zeros(fisher_bin_count) for name in policies}
+    fisher_derivatives = {name: np.zeros(fisher_bin_count) for name in policies}
+    chunks = (total_events + chunk_size - 1) // chunk_size
+    progress = tqdm(total=chunks * len(policies), desc="high-stat policy calibration", unit="policy-chunk")
+    for chunk in range(chunks):
+        count = min(chunk_size, total_events - chunk * chunk_size)
+        events = generate_events(
+            count, nominal_C, config, device,
+            make_generator(device, int(config["seed"]) + 300000 + chunk),
+        )
+        x = events["x"].cpu().numpy()
+        score = x / (1.0 + nominal_C * x)
+        for name, policy in policies.items():
+            reconstructed = reconstruct_policy(
+                policy, events, config,
+                make_generator(device, int(config["seed"]) + 310000 + chunk),
+            )
+            valid = reconstructed["valid"].cpu().numpy().astype(bool)
+            y = reconstructed["y"].cpu().numpy()[valid]
+            indices = np.clip(np.searchsorted(edges, y, side="right") - 1, 0, bin_count - 1)
+            fisher_indices = np.clip(
+                np.searchsorted(fisher_edges, y, side="right") - 1, 0, fisher_bin_count - 1,
+            )
+            counts[name] += np.bincount(indices, minlength=bin_count)
+            derivatives[name] += np.bincount(indices, weights=score[valid], minlength=bin_count)
+            fisher_counts[name] += np.bincount(fisher_indices, minlength=fisher_bin_count)
+            fisher_derivatives[name] += np.bincount(
+                fisher_indices, weights=score[valid], minlength=fisher_bin_count,
+            )
+            progress.update()
+    progress.close()
+    scale = target_exposure / total_events
+    scan = _scan(config)
+    templates = {
+        name: scale * (counts[name][None, :] + (scan[:, None] - nominal_C) * derivatives[name][None, :])
+        for name in policies
+    }
+    metrics = {
+        name: {
+            "events": total_events,
+            "valid_efficiency": float(counts[name].sum() / total_events),
+            "direct_fisher_bins": fisher_bin_count,
+            "binned_fisher_per_event": float(np.sum(
+                fisher_derivatives[name] ** 2 / np.clip(fisher_counts[name], 1.0e-12, None)
+            ) / total_events),
+        }
+        for name in policies
+    }
+    return templates, metrics
 
 
 def validate_reference_fisher(
@@ -143,6 +221,47 @@ def _write_history(output: Path, histories: dict[str, list[dict[str, float]]]) -
             writer.writerows(rows)
 
 
+def _write_refresh_artifacts(
+    output: Path,
+    checkpoints: Path,
+    config: dict[str, Any],
+    name: str,
+    score_model: ScoreModel,
+    rounds: list[dict[str, Any]],
+    history: list[dict[str, float]],
+) -> None:
+    torch.save(
+        {"method_version": 3, "diagnostic_only": False, "state_dict": score_model.state_dict()},
+        checkpoints / f"{name}_surrogate_score.pt",
+    )
+    serializable = [{key: value for key, value in row.items() if key not in {"score_grid", "score_curve"}} for row in rounds]
+    with (output / f"refresh_rounds_{name}.json").open("w", encoding="utf-8") as stream:
+        json.dump(serializable, stream, indent=2)
+    np.savez(
+        output / f"score_evolution_{name}.npz",
+        grid=np.stack([row["score_grid"] for row in rounds]),
+        scores=np.stack([row["score_curve"] for row in rounds]),
+    )
+    score_shifts = [
+        float(np.sqrt(np.mean((rounds[index]["score_curve"] - rounds[index - 1]["score_curve"]) ** 2)))
+        for index in range(1, len(rounds))
+    ]
+    invariants = {
+        "all_rounds_start_exactly_from_current_reference": all(row["start_max_parameter_difference"] == 0.0 for row in history),
+        "local_kl_reference": "current_round_policy",
+        "global_kl_reference": "original_baseline",
+        "candidate_replacement": "I_round - i_event_round + i_candidate",
+        "fisher_rebuilt_each_round": len(rounds) == int(len({row["round"] for row in history})),
+        "independent_fisher_sample_each_round": len({row["fisher_sample_seed"] for row in rounds}) == len(rounds),
+        "fixed_training_reference_seed_each_round": len({row["training_reference_seed"] for row in rounds}) == len(rounds),
+        "score_curve_rms_changes": score_shifts,
+        "score_refresh_changed_model": all(value > 0.0 for value in score_shifts),
+        "configured_total_dgpo_epochs": int(config["refresh"]["rounds"]) * int(config["refresh"]["dgpo_epochs_per_round"]),
+    }
+    with (output / f"refresh_invariants_{name}.json").open("w", encoding="utf-8") as stream:
+        json.dump(invariants, stream, indent=2)
+
+
 def train_pipeline(
     config: dict[str, Any], device: torch.device, nominal: dict[str, torch.Tensor], output: Path, checkpoints: Path,
 ) -> tuple[dict[str, ConditionalFlow], ScoreModel, dict[str, list[dict[str, float]]], dict[str, Any], dict[str, torch.Tensor]]:
@@ -173,6 +292,20 @@ def train_pipeline(
             reference_flow, score_model, train_events, reference_train, config, device,
             "fisher_dgpo_trust", float(config["dgpo"]["trust_kl_coefficient"]),
         )
+    if config["policies"].get("iterative_refresh_trust", False):
+        policy, active_score, refresh_history, rounds = train_iterative_refresh(
+            reference_flow, train_events, config, device, "iterative_refresh_trust", checkpoints,
+        )
+        policies["iterative_refresh_trust"] = policy
+        histories["iterative_refresh_trust"] = refresh_history
+        _write_refresh_artifacts(output, checkpoints, config, "iterative_refresh_trust", active_score, rounds, refresh_history)
+    if config["policies"].get("iterative_refresh_no_trust", False):
+        policy, active_score, refresh_history, rounds = train_iterative_refresh(
+            reference_flow, train_events, config, device, "iterative_refresh_no_trust", checkpoints, 0.0, 0.0,
+        )
+        policies["iterative_refresh_no_trust"] = policy
+        histories["iterative_refresh_no_trust"] = refresh_history
+        _write_refresh_artifacts(output, checkpoints, config, "iterative_refresh_no_trust", active_score, rounds, refresh_history)
     if config["policies"].get("fisher_dgpo_trust_bias_control", False):
         raise RuntimeError("Bias-control policy is intentionally disabled until the three primary policies establish score imbalance")
     _save_models(policies, score_model, checkpoints)
@@ -217,6 +350,9 @@ def evaluate_pipeline(
     rows: list[dict[str, Any]] = []
     experiments = int(config["data"]["pseudo_experiments"])
     events_per = int(config["data"]["events_per_pseudo_experiment"])
+    fit_templates, calibration_metrics = _build_high_stat_templates(config, device, policies, float(events_per))
+    with (output / "high_stat_calibration.json").open("w", encoding="utf-8") as stream:
+        json.dump(calibration_metrics, stream, indent=2)
     total = len(policies) * len(config["physics"]["true_C_values"]) * experiments
     progress = tqdm(total=total, desc="off-nominal closure", unit="toy")
     for name, policy in policies.items():
@@ -226,7 +362,7 @@ def evaluate_pipeline(
                 generator = make_generator(device, int(config["seed"]) + 100000 + 1000 * truth_index + experiment)
                 pseudo = generate_events(events_per, C_true, config, device, generator)
                 reconstructed = reconstruct_policy(policy, pseudo, config, generator)
-                estimate, lower, upper, _ = _fit_reconstructed(reconstructed, calibration_events, calibrations[name], config)
+                estimate, lower, upper, _ = _fit_with_templates(reconstructed, fit_templates[name], config)
                 sigma = 0.5 * (lower + upper)
                 rows.append({
                     "policy": name, "C_true": C_true, "pseudo_experiment": experiment,
@@ -248,6 +384,12 @@ def evaluate_pipeline(
         json.dump(summaries, stream, indent=2)
     from .plots import make_all_plots
     make_all_plots(nominal, calibration_events, policies, score_model, calibrations, histories, fisher_validation, summaries, config, device, output)
+    if "iterative_refresh_trust" in policies:
+        from .refresh_study import make_refresh_study
+        make_refresh_study(
+            policies, score_model, histories, calibration_events, calibrations,
+            calibration_metrics, summaries, config, device, output, output / "checkpoints",
+        )
     return summaries
 
 
@@ -267,7 +409,7 @@ def run(config_path: str | Path, mode: str, device_override: str | None, output_
             raise FileNotFoundError(f"Missing {resolved_path}; {mode} requires an existing trained/evaluated run")
         with resolved_path.open(encoding="utf-8") as stream:
             trained_config = yaml.safe_load(stream)
-        compared_sections = ("physics", "detector", "flow", "training", "inference", "policies")
+        compared_sections = ("physics", "detector", "flow", "training", "refresh", "inference", "policies")
         mismatched = [section for section in compared_sections if trained_config.get(section) != config.get(section)]
         if mismatched:
             raise RuntimeError(f"Diagnostic configuration does not match the frozen run in sections: {mismatched}")

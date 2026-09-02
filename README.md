@@ -9,9 +9,9 @@ The implemented chain is:
 3. Smear the two visible four-momenta and construct an observed seed direction.
 4. Train a conditional normalizing flow on the exact sphere-log-map target at nominal `C0 = 0.60`.
 5. Reconstruct `y = c_A,reco c_B,reco` explicitly from each candidate tau four-momentum.
-6. Train and freeze `s_ref(y) = E[t(X)|Y=y]`, where `t(x)=x/(1+C0 x)`.
+6. Train `s_r(y) = E[t(X)|Y=y; pi_r]`, where `t(x)=x/(1+C0 x)`, and freeze it within each local update.
 7. Require pre-DGPO agreement among score Fisher, fine-binned Poisson Fisher, and nominal pseudo-experiment width.
-8. Optimize candidate preferences with the exact event-replacement Fisher reward and, for the trusted policy, `KL(q_phi || q_ref)`.
+8. Compare the original 30-epoch frozen-score policy with an iterative policy that refreshes the score and Fisher reference before each short update. Both use the exact event-replacement Fisher reward; the iterative local trust is `KL(pi_phi || pi_r)`.
 9. Fit independent off-nominal pseudo-data with nominal-only, analytically reweighted, reconstructed-level Poisson templates.
 
 The final parameter estimate and its asymmetric 68% interval come from the Poisson forward-folding likelihood and `Delta(-2 log L)=1`. The pipeline deliberately stops before DGPO if the pre-training Fisher closure gate fails.
@@ -51,11 +51,11 @@ toy-dgpo diagnose --config config/default.yaml --device cuda
 toy-dgpo closure --config config/default.yaml --device cuda
 ```
 
-`diagnose` does not update the policies. It loads the three frozen checkpoints, trains independent diagnostic-only policy-specific score models on new nominal MC, reuses the existing off-nominal summary, and writes `diagnosis.md`.
+`diagnose` does not update the policies. It loads the baseline and enabled optimized checkpoints, trains independent diagnostic-only policy-specific score models on new nominal MC, reuses the existing off-nominal summary, and writes `diagnosis.md`.
 
 `closure` is strictly read-only with respect to every checkpoint. It uses binned policy-specific Poisson intensity scores and direct-versus-reweighted high-statistics samples, without training any flow or score model. It writes plots `19_extended_score_closure.png` through `23_asimov_likelihood_examples.png` and updates `diagnosis.md`.
 
-The terminal reports progress for baseline flow MLE, frozen score regression, the pre-DGPO closure toys, each DGPO policy, and all off-nominal pseudo-experiments.
+The terminal reports progress for baseline flow MLE, every score refresh, each local DGPO round, high-statistics policy calibration, independent final score estimation, and all off-nominal pseudo-experiments.
 
 ## Outputs
 
@@ -75,6 +75,14 @@ The output directory contains the resolved YAML, versioned checkpoints, Fisher g
 - `diagnosis_metrics.csv`, `17_offnominal_detailed.csv`, `diagnosis_metrics.json`, and `diagnosis.md`
 - `19_extended_score_closure.png` through `23_asimov_likelihood_examples.png`
 - `extended_score_closure.csv`, `template_closure_metrics.csv`, and `statistical_closure.json`
+
+The `refresh_study/` subdirectory contains the focused iterative-refresh comparison:
+
+- `01_refresh_training.png` through `07_final_summary.png`
+- `refresh_study_metrics.csv` and `refresh_study_metrics.json`
+- independent diagnostic score checkpoints for every compared policy
+
+Round-aligned reference-policy, updated-policy, and score checkpoints are stored under `checkpoints/iterative_refresh_*/`. The root output also records `refresh_rounds_*.json`, `score_evolution_*.npz`, and executable smoke-test invariants in `refresh_invariants_*.json`.
 
 `config/smoke.yaml` is a software-path test only. Its small ensemble cannot establish scientific coverage.
 

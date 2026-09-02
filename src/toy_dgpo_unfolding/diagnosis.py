@@ -22,6 +22,8 @@ def _label(name: str) -> str:
         "baseline": "Baseline",
         "fisher_dgpo_no_trust": "No trust",
         "fisher_dgpo_trust": "Trust",
+        "iterative_refresh_trust": "Iterative refresh trust",
+        "iterative_refresh_no_trust": "Iterative refresh no trust",
     }.get(name, name.replace("_", " ").title())
 
 
@@ -401,9 +403,12 @@ def run_diagnosis(
     config: dict[str, Any], device: torch.device, policies: dict[str, ConditionalFlow],
     reference_score: ScoreModel, output: Path,
 ) -> None:
-    names = [name for name in ("baseline", "fisher_dgpo_no_trust", "fisher_dgpo_trust") if name in policies]
-    if len(names) != 3:
-        raise RuntimeError("Diagnosis requires baseline, fisher_dgpo_no_trust, and fisher_dgpo_trust checkpoints")
+    names = [name for name in (
+        "baseline", "fisher_dgpo_trust", "iterative_refresh_trust", "iterative_refresh_no_trust",
+        "fisher_dgpo_no_trust",
+    ) if name in policies]
+    if "baseline" not in names or len(names) < 2:
+        raise RuntimeError("Diagnosis requires the baseline and at least one optimized frozen policy")
     settings = config["diagnosis"]
     count = int(settings["nominal_events"])
     fraction = float(settings["score_train_fraction"])
