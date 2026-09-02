@@ -17,7 +17,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
         raise ValueError("Configuration root must be a mapping")
     required = {
         "physics", "detector", "data", "flow", "training", "fisher_validation",
-        "dgpo", "inference", "policies", "plots",
+        "dgpo", "inference", "diagnosis", "policies", "plots",
     }
     missing = required.difference(config)
     if missing:

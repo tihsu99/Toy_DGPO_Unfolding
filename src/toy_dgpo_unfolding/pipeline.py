@@ -260,9 +260,25 @@ def run(config_path: str | Path, mode: str, device_override: str | None, output_
     seed_everything(int(config["seed"]))
     device = resolve_device(str(config.get("device", "auto")))
     output, checkpoints = _paths(config)
+    print(f"Using device: {device}", flush=True)
+    if mode == "diagnose":
+        resolved_path = output / "resolved_config.yaml"
+        if not resolved_path.exists():
+            raise FileNotFoundError(f"Missing {resolved_path}; diagnosis requires an existing trained/evaluated run")
+        with resolved_path.open(encoding="utf-8") as stream:
+            trained_config = yaml.safe_load(stream)
+        compared_sections = ("physics", "detector", "flow", "training", "inference", "policies")
+        mismatched = [section for section in compared_sections if trained_config.get(section) != config.get(section)]
+        if mismatched:
+            raise RuntimeError(f"Diagnostic configuration does not match the frozen run in sections: {mismatched}")
+        with (output / "resolved_diagnosis_config.yaml").open("w", encoding="utf-8") as stream:
+            yaml.safe_dump(config, stream, sort_keys=False)
+        policies, score_model = _load_models(config, device, checkpoints)
+        from .diagnosis import run_diagnosis
+        run_diagnosis(config, device, policies, score_model, output)
+        return
     with (output / "resolved_config.yaml").open("w", encoding="utf-8") as stream:
         yaml.safe_dump(config, stream, sort_keys=False)
-    print(f"Using device: {device}", flush=True)
     nominal = _nominal_events(config, device)
     if mode in {"run", "train"}:
         policies, score_model, histories, fisher_validation, _ = train_pipeline(config, device, nominal, output, checkpoints)

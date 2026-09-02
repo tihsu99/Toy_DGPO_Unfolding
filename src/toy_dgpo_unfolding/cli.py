@@ -8,7 +8,7 @@ from .pipeline import run
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the toy DGPO forward-folding closure pipeline")
     subparsers = parser.add_subparsers(dest="mode", required=True)
-    for mode in ("run", "train", "evaluate"):
+    for mode in ("run", "train", "evaluate", "diagnose"):
         command = subparsers.add_parser(mode)
         command.add_argument("--config", default="config/default.yaml", help="YAML experiment configuration")
         command.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), help="Override the configured device")

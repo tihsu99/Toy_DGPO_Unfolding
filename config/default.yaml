@@ -60,6 +60,19 @@ inference:
   scan_range: [-0.95, 0.95]
   scan_points: 381
 
+diagnosis:
+  nominal_events: 300000
+  score_train_fraction: 0.50
+  score_epochs: 50
+  score_fisher_relative_tolerance: 0.30
+  stale_fisher_gain_gap_threshold: 0.10
+  kl_concentration_ratio_threshold: 3.0
+  score_balance_z_threshold: 2.0
+  fisher_reco_bins: [20, 30, 40, 60, 80]
+  truth_x_bins: 20
+  score_magnitude_bins: 12
+  score_grid_points: 400
+
 policies:
   baseline: true
   fisher_dgpo_no_trust: true
