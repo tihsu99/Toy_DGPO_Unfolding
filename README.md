@@ -76,13 +76,13 @@ The output directory contains the resolved YAML, versioned checkpoints, Fisher g
 - `19_extended_score_closure.png` through `23_asimov_likelihood_examples.png`
 - `extended_score_closure.csv`, `template_closure_metrics.csv`, and `statistical_closure.json`
 
-The `refresh_study/` subdirectory contains the focused iterative-refresh comparison:
+The `ablation_study/` subdirectory contains the controlled 2x2 score-refresh and KL-trust comparison:
 
-- `01_refresh_training.png` through `07_final_summary.png`
-- `refresh_study_metrics.csv` and `refresh_study_metrics.json`
-- independent diagnostic score checkpoints for every compared policy
+- the eight focused figures `01_ablation_fisher.png` through `08_final_ablation_dashboard.png`
+- `final_ablation_metrics.csv`, `final_ablation_metrics.json`, and `ablation_report.md`
+- per-round stale-gap CSV/JSON and independent diagnostic score checkpoints for both iterative policies
 
-Round-aligned reference-policy, updated-policy, and score checkpoints are stored under `checkpoints/iterative_refresh_*/`. The root output also records `refresh_rounds_*.json`, `score_evolution_*.npz`, and executable smoke-test invariants in `refresh_invariants_*.json`.
+Round-aligned reference-policy, updated-policy, and active-score checkpoints are stored under `checkpoints/iterative_refresh_*/`. The ablation configuration enforces all five policies, equal 30-epoch optimized budgets, zero global KL, and a direct-Fisher convergence scan reaching at least 80 reconstructed-y bins.
 
 `config/smoke.yaml` is a software-path test only. Its small ensemble cannot establish scientific coverage.
 

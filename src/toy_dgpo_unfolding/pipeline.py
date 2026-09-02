@@ -254,6 +254,11 @@ def _write_refresh_artifacts(
         "fisher_rebuilt_each_round": len(rounds) == int(len({row["round"] for row in history})),
         "independent_fisher_sample_each_round": len({row["fisher_sample_seed"] for row in rounds}) == len(rounds),
         "fixed_training_reference_seed_each_round": len({row["training_reference_seed"] for row in rounds}) == len(rounds),
+        "loss_beta_local": history[0]["beta_local"],
+        "loss_beta_global": history[0]["beta_global"],
+        "no_trust_loss_has_no_kl": name != "iterative_refresh_no_trust" or all(
+            row["beta_local"] == 0.0 and row["beta_global"] == 0.0 for row in history
+        ),
         "score_curve_rms_changes": score_shifts,
         "score_refresh_changed_model": all(value > 0.0 for value in score_shifts),
         "configured_total_dgpo_epochs": int(config["refresh"]["rounds"]) * int(config["refresh"]["dgpo_epochs_per_round"]),
@@ -382,13 +387,16 @@ def evaluate_pipeline(
             writer.writerows(data)
     with (output / "summary.json").open("w", encoding="utf-8") as stream:
         json.dump(summaries, stream, indent=2)
-    from .plots import make_all_plots
-    make_all_plots(nominal, calibration_events, policies, score_model, calibrations, histories, fisher_validation, summaries, config, device, output)
-    if "iterative_refresh_trust" in policies:
-        from .refresh_study import make_refresh_study
-        make_refresh_study(
-            policies, score_model, histories, calibration_events, calibrations,
-            calibration_metrics, summaries, config, device, output, output / "checkpoints",
+    if config["ablation"].get("enabled", False):
+        from .refresh_study import make_ablation_study
+        make_ablation_study(
+            policies, score_model, histories, summaries, config, device, output, output / "checkpoints",
+        )
+    else:
+        from .plots import make_all_plots
+        make_all_plots(
+            nominal, calibration_events, policies, score_model, calibrations,
+            histories, fisher_validation, summaries, config, device, output,
         )
     return summaries
 
@@ -409,7 +417,7 @@ def run(config_path: str | Path, mode: str, device_override: str | None, output_
             raise FileNotFoundError(f"Missing {resolved_path}; {mode} requires an existing trained/evaluated run")
         with resolved_path.open(encoding="utf-8") as stream:
             trained_config = yaml.safe_load(stream)
-        compared_sections = ("physics", "detector", "flow", "training", "refresh", "inference", "policies")
+        compared_sections = ("physics", "detector", "flow", "training", "refresh", "ablation", "inference", "policies")
         mismatched = [section for section in compared_sections if trained_config.get(section) != config.get(section)]
         if mismatched:
             raise RuntimeError(f"Diagnostic configuration does not match the frozen run in sections: {mismatched}")

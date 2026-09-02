@@ -17,7 +17,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
         raise ValueError("Configuration root must be a mapping")
     required = {
         "physics", "detector", "data", "flow", "training", "fisher_validation",
-        "dgpo", "refresh", "inference", "diagnosis", "closure", "policies", "plots",
+        "dgpo", "refresh", "ablation", "inference", "diagnosis", "closure", "policies", "plots",
     }
     missing = required.difference(config)
     if missing:
@@ -30,6 +30,20 @@ def load_config(path: str | Path) -> dict[str, Any]:
         raise ValueError("refresh.dgpo_epochs_per_round must be positive")
     if int(config["refresh"]["direct_fisher_bins"]) < 2:
         raise ValueError("refresh.direct_fisher_bins must be at least two")
+    if config["ablation"].get("enabled", False):
+        required_policies = set(config["ablation"]["policy_order"])
+        disabled = sorted(name for name in required_policies if not config["policies"].get(name, False))
+        if disabled:
+            raise ValueError(f"The enabled ablation requires these policies: {disabled}")
+        frozen_epochs = int(config["dgpo"]["epochs"])
+        refresh_epochs = int(config["refresh"]["rounds"]) * int(config["refresh"]["dgpo_epochs_per_round"])
+        if frozen_epochs != refresh_epochs:
+            raise ValueError("The ablation requires equal frozen and iterative DGPO epoch budgets")
+        if float(config["refresh"]["beta_global"]) != 0.0:
+            raise ValueError("The clean ablation requires refresh.beta_global = 0")
+        bin_counts = [int(value) for value in config["ablation"]["fisher_bin_counts"]]
+        if not bin_counts or max(bin_counts) < 80:
+            raise ValueError("The ablation requires a direct Fisher result with at least 80 bins")
     if not config["policies"].get("baseline", False):
         raise ValueError("policies.baseline must be enabled because it defines the frozen reference")
     if not 0.0 < float(config["physics"]["nominal_C"]) < 1.0:

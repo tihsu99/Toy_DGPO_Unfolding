@@ -67,6 +67,19 @@ refresh:
   beta_global: 0.0
   output_subdir: refresh_study
 
+ablation:
+  enabled: true
+  output_subdir: ablation_study
+  policy_order:
+    - baseline
+    - fisher_dgpo_no_trust
+    - fisher_dgpo_trust
+    - iterative_refresh_no_trust
+    - iterative_refresh_trust
+  diagnostic_score_events: 3000
+  evaluation_events: 4000
+  fisher_bin_counts: [20, 40, 80]
+
 inference:
   reco_bins: 12
   scan_range: [-0.95, 0.95]
@@ -97,10 +110,10 @@ closure:
 
 policies:
   baseline: true
-  fisher_dgpo_no_trust: false
+  fisher_dgpo_no_trust: true
   fisher_dgpo_trust: true
   iterative_refresh_trust: true
-  iterative_refresh_no_trust: false
+  iterative_refresh_no_trust: true
   fisher_dgpo_trust_bias_control: false
 
 plots:

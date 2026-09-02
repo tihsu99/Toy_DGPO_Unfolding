@@ -206,9 +206,9 @@ def train_dgpo(
     information_reference = reference["information"].sum().detach()
     history: list[dict[str, float]] = []
     progress = tqdm(range(int(settings["epochs"])), desc=name.replace("_", " "), unit="epoch")
-    generator = make_generator(device, int(config["seed"]) + 30000 + (0 if kl_coefficient == 0.0 else 1000))
+    generator = make_generator(device, int(config["seed"]) + 30000)
     for epoch in progress:
-        permutation = torch.randperm(events["x"].numel(), device=device)
+        permutation = torch.randperm(events["x"].numel(), device=device, generator=generator)
         reward_total = 0.0
         invalid_total = 0.0
         seen = 0
@@ -288,7 +288,7 @@ def train_local_dgpo_round(
     progress = tqdm(range(epochs), desc=f"{name} round {round_index + 1}", unit="epoch")
     generator = make_generator(device, seed)
     for local_epoch in progress:
-        permutation = torch.randperm(events["x"].numel(), device=device)
+        permutation = torch.randperm(events["x"].numel(), device=device, generator=generator)
         reward_total = 0.0
         local_kl_total = 0.0
         global_kl_total = 0.0
@@ -348,6 +348,8 @@ def train_local_dgpo_round(
             "training_invalid_fraction": invalid_total / seen,
             "reference_fisher": float(information_reference),
             "start_max_parameter_difference": start_difference,
+            "beta_local": beta_local,
+            "beta_global": beta_global,
         })
         history.append(metrics)
         policy.train()
