@@ -219,11 +219,11 @@ def evaluate_pipeline(
     events_per = int(config["data"]["events_per_pseudo_experiment"])
     total = len(policies) * len(config["physics"]["true_C_values"]) * experiments
     progress = tqdm(total=total, desc="off-nominal closure", unit="toy")
-    for policy_index, (name, policy) in enumerate(policies.items()):
+    for name, policy in policies.items():
         for truth_index, value in enumerate(config["physics"]["true_C_values"]):
             C_true = float(value)
             for experiment in range(experiments):
-                generator = make_generator(device, int(config["seed"]) + 100000 * (policy_index + 1) + 1000 * truth_index + experiment)
+                generator = make_generator(device, int(config["seed"]) + 100000 + 1000 * truth_index + experiment)
                 pseudo = generate_events(events_per, C_true, config, device, generator)
                 reconstructed = reconstruct_policy(policy, pseudo, config, generator)
                 estimate, lower, upper, _ = _fit_reconstructed(reconstructed, calibration_events, calibrations[name], config)
@@ -261,21 +261,25 @@ def run(config_path: str | Path, mode: str, device_override: str | None, output_
     device = resolve_device(str(config.get("device", "auto")))
     output, checkpoints = _paths(config)
     print(f"Using device: {device}", flush=True)
-    if mode == "diagnose":
+    if mode in {"diagnose", "closure"}:
         resolved_path = output / "resolved_config.yaml"
         if not resolved_path.exists():
-            raise FileNotFoundError(f"Missing {resolved_path}; diagnosis requires an existing trained/evaluated run")
+            raise FileNotFoundError(f"Missing {resolved_path}; {mode} requires an existing trained/evaluated run")
         with resolved_path.open(encoding="utf-8") as stream:
             trained_config = yaml.safe_load(stream)
         compared_sections = ("physics", "detector", "flow", "training", "inference", "policies")
         mismatched = [section for section in compared_sections if trained_config.get(section) != config.get(section)]
         if mismatched:
             raise RuntimeError(f"Diagnostic configuration does not match the frozen run in sections: {mismatched}")
-        with (output / "resolved_diagnosis_config.yaml").open("w", encoding="utf-8") as stream:
+        with (output / f"resolved_{mode}_config.yaml").open("w", encoding="utf-8") as stream:
             yaml.safe_dump(config, stream, sort_keys=False)
         policies, score_model = _load_models(config, device, checkpoints)
-        from .diagnosis import run_diagnosis
-        run_diagnosis(config, device, policies, score_model, output)
+        if mode == "diagnose":
+            from .diagnosis import run_diagnosis
+            run_diagnosis(config, device, policies, score_model, output)
+        else:
+            from .closure import run_statistical_closure
+            run_statistical_closure(config, device, policies, output)
         return
     with (output / "resolved_config.yaml").open("w", encoding="utf-8") as stream:
         yaml.safe_dump(config, stream, sort_keys=False)

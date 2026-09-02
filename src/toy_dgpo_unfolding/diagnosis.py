@@ -199,7 +199,7 @@ def _plot_score_balance(metrics: list[dict[str, Any]], config: dict[str, Any], o
     axes[1].set(xticks=positions, xticklabels=[_label(name) for name in names], ylabel=r"$|U|/\sqrt{I}$")
     axes[0].legend(frameon=False)
     axes[1].legend(frameon=False)
-    fig.suptitle("Score-sign balance on the same independent nominal sample")
+    fig.suptitle("Extended-Poisson compensated score balance")
     fig.tight_layout()
     fig.savefig(output / "14_score_balance_diagnostics.png", dpi=int(config["plots"]["dpi"]))
     plt.close(fig)
@@ -377,7 +377,8 @@ def _write_diagnosis(
         lines.append(f"- {_label(row['policy'])}: global KL {row['global_kl']:.4g}, maximum absolute truth-bin KL {local_max:.4g}, concentration ratio {ratio:.2f}.")
     lines.extend(["", "## 6. Local versus global KL", "", "Global KL hides concentrated phase-space drift." if any(concentration) else f"No greater-than-{concentration_threshold:g}-fold KL concentration is established.", ""])
 
-    lines.extend(["## 7. Score balance versus fitted bias", ""])
+    lines.extend(["## 7. Extended-Poisson score balance versus fitted bias", ""])
+    lines.extend(["The full score is U_full = sum_i s(y_i) - Lambda'(C0). The intensity-score Fisher already contains rate and shape information; no separate rate-Fisher term is added.", ""])
     nominal_C = float(config["physics"]["nominal_C"])
     for row in metrics:
         nominal = min((item for item in summary if item["policy"] == row["policy"]), key=lambda item: abs(item["C_true"] - nominal_C))
@@ -392,19 +393,7 @@ def _write_diagnosis(
         balance_conclusion = f"No: among the optimized policies, frozen |b_local| ranks **{_label(largest_frozen_b)}**, frozen Z_bias ranks **{_label(largest_frozen_z)}**, while the larger observed off-nominal bias belongs to **{_label(largest_observed_bias)}**."
     lines.extend(["", balance_conclusion, ""])
 
-    recommendations = []
-    if any(stale):
-        recommendations.extend(["shorter local DGPO rounds", "periodic score refresh"])
-    if any(concentration):
-        recommendations.append("stronger or phase-space-local trust")
-    score_balance_threshold = float(config["diagnosis"]["score_balance_z_threshold"])
-    if any(score_closed[row["policy"]] and row["specific_Z_bias"] > score_balance_threshold for row in optimized):
-        recommendations.append("an explicit reconstructed-score balance constraint")
-    if any(inconclusive):
-        recommendations.insert(0, "first make the independent diagnostic score close against direct binned Fisher")
-    if not recommendations:
-        recommendations.append("no method change until a statistically adequate diagnostic sample establishes a mismatch")
-    lines.extend(["## 8. Next logical fix", "", "Based on these diagnostics, the next candidates are: " + ", ".join(dict.fromkeys(recommendations)) + ". No fix is implemented by this diagnostic command.", ""])
+    lines.extend(["## 8. Statistical closure requirement", "", "No training-method change is justified until the direct-versus-reweighted high-statistics Asimov closure passes.", ""])
     (output / "diagnosis.md").write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -489,8 +478,11 @@ def run_diagnosis(
             score_curve_rms[name] = float(np.sqrt(np.mean((specific[valid] - frozen[valid]) ** 2)))
             frozen_I = float(frozen_information.sum())
             specific_I = float(specific_information.sum())
-            frozen_U = float(frozen.sum())
-            specific_U = float(specific.sum())
+            frozen_score_sum = float(frozen.sum())
+            specific_score_sum = float(specific.sum())
+            yield_derivative = float(np.sum(valid * x / (1.0 + nominal_C * x)))
+            frozen_U = frozen_score_sum - yield_derivative
+            specific_U = specific_score_sum - yield_derivative
             data[name] = {
                 "valid": valid, "y": y, "raw_frozen": raw_frozen,
                 "frozen": frozen, "specific": specific, "kl": kl,
@@ -499,7 +491,10 @@ def run_diagnosis(
                 "specific_mean_valid": float(specific_information[valid].mean()),
                 "frozen_fisher": frozen_I / x.size,
                 "specific_fisher": specific_I / x.size,
-                "frozen_U": frozen_U, "specific_U": specific_U,
+                "frozen_score_sum": frozen_score_sum,
+                "specific_score_sum": specific_score_sum,
+                "yield_derivative": yield_derivative,
+                "frozen_U_full": frozen_U, "specific_U_full": specific_U,
                 "frozen_b": frozen_U / frozen_I,
                 "specific_b": specific_U / specific_I,
                 "frozen_Z": abs(frozen_U) / np.sqrt(frozen_I),
@@ -558,8 +553,11 @@ def run_diagnosis(
             "binned_sigma_ratio": np.sqrt(baseline_binned / binned[name][-1]),
             "actual_sigma_ratio": actual_sigma_ratio,
             "actual_precision_gain": 1.0 / actual_sigma_ratio - 1.0,
-            "frozen_U": data[name]["frozen_U"],
-            "specific_U": data[name]["specific_U"],
+            "frozen_score_sum": data[name]["frozen_score_sum"],
+            "specific_score_sum": data[name]["specific_score_sum"],
+            "yield_derivative": data[name]["yield_derivative"],
+            "frozen_U_full": data[name]["frozen_U_full"],
+            "specific_U_full": data[name]["specific_U_full"],
             "frozen_b_local": data[name]["frozen_b"],
             "specific_b_local": data[name]["specific_b"],
             "frozen_Z_bias": data[name]["frozen_Z"],

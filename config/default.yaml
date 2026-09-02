@@ -67,11 +67,19 @@ diagnosis:
   score_fisher_relative_tolerance: 0.30
   stale_fisher_gain_gap_threshold: 0.10
   kl_concentration_ratio_threshold: 3.0
-  score_balance_z_threshold: 2.0
   fisher_reco_bins: [20, 30, 40, 60, 80]
   truth_x_bins: 20
   score_magnitude_bins: 12
   score_grid_points: 400
+
+closure:
+  events: 1000000
+  chunk_size: 100000
+  score_per_event_tolerance: 5.0e-4
+  yield_relative_tolerance: 0.01
+  shape_total_variation_tolerance: 0.02
+  asimov_bias_tolerance: 0.05
+  asimov_sigma_tolerance: 3.0
 
 policies:
   baseline: true

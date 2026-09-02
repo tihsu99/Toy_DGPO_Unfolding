@@ -48,9 +48,12 @@ Training and evaluation can be split across allocations:
 toy-dgpo train --config config/default.yaml --device cuda
 toy-dgpo evaluate --config config/default.yaml --device cuda
 toy-dgpo diagnose --config config/default.yaml --device cuda
+toy-dgpo closure --config config/default.yaml --device cuda
 ```
 
 `diagnose` does not update the policies. It loads the three frozen checkpoints, trains independent diagnostic-only policy-specific score models on new nominal MC, reuses the existing off-nominal summary, and writes `diagnosis.md`.
+
+`closure` is strictly read-only with respect to every checkpoint. It uses binned policy-specific Poisson intensity scores and direct-versus-reweighted high-statistics samples, without training any flow or score model. It writes plots `19_extended_score_closure.png` through `23_asimov_likelihood_examples.png` and updates `diagnosis.md`.
 
 The terminal reports progress for baseline flow MLE, frozen score regression, the pre-DGPO closure toys, each DGPO policy, and all off-nominal pseudo-experiments.
 
@@ -70,6 +73,8 @@ The output directory contains the resolved YAML, versioned checkpoints, Fisher g
 - `08_final_dashboard.png`
 - `09_fisher_decomposition.png` through `18_reward_hacking_diagnosis.png`
 - `diagnosis_metrics.csv`, `17_offnominal_detailed.csv`, `diagnosis_metrics.json`, and `diagnosis.md`
+- `19_extended_score_closure.png` through `23_asimov_likelihood_examples.png`
+- `extended_score_closure.csv`, `template_closure_metrics.csv`, and `statistical_closure.json`
 
 `config/smoke.yaml` is a software-path test only. Its small ensemble cannot establish scientific coverage.
 

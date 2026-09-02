@@ -71,6 +71,26 @@ def fit_poisson(observed: np.ndarray, templates: np.ndarray, scan: np.ndarray) -
     return _fit_scan(poisson_deviance(observed, templates), scan)
 
 
+def poisson_score_components(
+    observed: np.ndarray,
+    expected: np.ndarray,
+    expected_derivative: np.ndarray,
+) -> tuple[float, float, float, float]:
+    """Return event-score sum, Poisson compensator, full score, and Fisher.
+
+    The intensity score expected_derivative / expected already contains both
+    rate and shape information.  Consequently, Fisher is sum(mu'^2 / mu);
+    no additional rate-Fisher term may be added.
+    """
+    expected = np.clip(np.asarray(expected, dtype=float), 1.0e-12, None)
+    derivative = np.asarray(expected_derivative, dtype=float)
+    score_sum = float(np.sum(np.asarray(observed, dtype=float) * derivative / expected))
+    compensator = float(np.sum(derivative))
+    full_score = score_sum - compensator
+    fisher = float(np.sum(derivative**2 / expected))
+    return score_sum, compensator, full_score, fisher
+
+
 def binned_fisher_per_event(
     nominal_x: np.ndarray,
     nominal_y: np.ndarray,
