@@ -172,6 +172,35 @@ The isolated BC5 workflow additionally writes:
 
 Every figure has a CSV or JSON source-data companion. The baseline BC5 Fisher report includes `sigma(B_plus_n)`, `sigma(B_minus_n)`, and the full eigenvalue/eigenvector decomposition before policy training.
 
+## Consolidated conditional-precision study
+
+The primary spin-measurement study is isolated in `config/spin_conditional.yaml` and writes only to `outputs/ztautau_spin_conditional/`. The earlier Cnn, Cdiag, and exploratory BC5 outputs above remain reproducible historical studies and are not overwritten. The consolidated comparison trains exactly three no-trust policies from the same frozen baseline:
+
+```text
+Cnn   = (C_nn)
+Cdiag = (C_nn, C_rr, C_kk)
+BC5   = (C_nn, C_rr, C_kk, B_A_n, B_B_n)
+```
+
+The primary per-parameter uncertainty is conditional, `sigma_a = 1 / sqrt(F_aa)`, with the other spin coefficients fixed. The multi-target objective is `J_cond = mean(F0_aa / F_aa)`. Its event replacement uses only diagonal score squares; no Fisher inverse, jointly profiled covariance, Fisher eigenmode, or KL term enters the reward or checkpoint selection.
+
+Each fixed two-epoch local update is accepted only when a freshly trained diagnostic score on an independent fixed high-statistics sample improves validation `J_cond` beyond a tolerance derived from the configured minimum and the split-sample validation noise. Rejected trials roll back to the current accepted policy, optionally retry once at lower learning rate, and count toward early stopping. NMSE, tau-axis error, and KL to the initial baseline remain diagnostics only.
+
+Run training and evaluation together with:
+
+```bash
+toy-dgpo spin-conditional-run --spin-config config/spin_conditional.yaml --device cuda
+```
+
+Or split the stages:
+
+```bash
+toy-dgpo spin-conditional-train --spin-config config/spin_conditional.yaml --device cuda
+toy-dgpo spin-conditional-evaluate --spin-config config/spin_conditional.yaml --device cuda
+```
+
+The six primary figures are `conditional_multitarget_summary.png`, `full15_conditional_passive_transfer.png`, `measurement_accept_reject_training.png`, `conditional_score_closure.png`, `target_information_decomposition.png`, and `final_conditional_summary_table.png`. Each has editable SVG and CSV/JSON source-data companions. `final_Cnn_pseudoexperiment_closure.{csv,json}` compares the predicted conditional Fisher width with the independent nominal pseudo-experiment `Std(C_hat)` using exact nominal reweighting.
+
 ## Validation
 
 ```bash
@@ -179,6 +208,7 @@ source .venv/bin/activate
 python -m unittest discover -s tests -v
 toy-dgpo run --config config/smoke.yaml --device cpu
 toy-dgpo spin-run --spin-config config/spin_bc5_smoke.yaml --device cpu
+toy-dgpo spin-conditional-run --spin-config config/spin_conditional_smoke.yaml --device cpu
 ```
 
 The spin smoke commands require the preceding smoke `C_nn` and Cdiag checkpoints. Smoke outputs validate software paths only and are not physics-performance evidence.

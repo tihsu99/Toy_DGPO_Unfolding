@@ -1,0 +1,80 @@
+base_config: default.yaml
+cnn_output_dir: outputs/ztautau
+output_dir: outputs/ztautau_spin_conditional
+
+target_sets:
+  Cnn: [C_nn]
+  Cdiag: [C_nn, C_rr, C_kk]
+  BC5: [C_nn, C_rr, C_kk, B_A_n, B_B_n]
+primary_parameters: [C_nn, C_rr, C_kk, B_A_n, B_B_n]
+
+training:
+  dgpo_epochs_per_refresh: 2
+  max_total_dgpo_epochs: 20
+  active_score_events: 200000
+  policy_training_events: 200000
+  monitor_events: 100000
+  score_epochs: 60
+  score_hidden_width: 64
+  score_hidden_layers: 3
+  batch_size: 4096
+  group_size: 8
+  learning_rate: 0.0002
+  weight_decay: 1.0e-5
+  grad_clip_norm: 5.0
+  reward_scale: 100000.0
+
+validation:
+  score_training_events: 300000
+  evaluation_events: 300000
+  score_epochs: 60
+  score_hidden_width: 64
+  score_hidden_layers: 3
+  batch_size: 4096
+  min_relative_J_improvement: 0.002
+  split_noise_multiplier: 2.0
+  early_stop_patience_attempts: 3
+  learning_rate_backoff: 0.5
+  retry_epochs: 1
+  max_retries_after_rejection: 1
+  direct_Cnn_bins: 80
+
+evaluation:
+  score_training_events: 300000
+  events: 300000
+  score_epochs: 60
+  score_hidden_width: 64
+  score_hidden_layers: 3
+  batch_size: 4096
+  direct_Cnn_bins: 80
+  pseudo_template_events: 1000000
+  pseudo_template_chunk_size: 100000
+  pseudo_experiments: 300
+  events_per_pseudo_experiment: 20000
+  pseudo_bins: 30
+
+seed_offsets:
+  active_score: 1100000
+  policy_training: 1200000
+  policy_reconstruction: 1300000
+  policy_sampling: 1400000
+  monitor: 1500000
+  monitor_reconstruction: 1510000
+  validation_score_training: 1600000
+  validation_score_reconstruction: 1610000
+  validation_evaluation: 1700000
+  validation_reconstruction: 1710000
+  evaluation_score_training: 1800000
+  evaluation_score_reconstruction: 1810000
+  evaluation_events: 1900000
+  evaluation_reconstruction: 1910000
+  pseudo_templates: 2000000
+  pseudo_template_reconstruction: 2010000
+  pseudo_events: 2100000
+  pseudo_reconstruction: 2110000
+
+plots:
+  dpi: 300
+  export_svg: true
+
+allow_overwrite: false

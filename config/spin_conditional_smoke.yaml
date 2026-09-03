@@ -1,0 +1,80 @@
+base_config: smoke.yaml
+cnn_output_dir: /private/tmp/toy_dgpo_consolidation_smoke
+output_dir: /private/tmp/toy_dgpo_spin_conditional_smoke
+
+target_sets:
+  Cnn: [C_nn]
+  Cdiag: [C_nn, C_rr, C_kk]
+  BC5: [C_nn, C_rr, C_kk, B_A_n, B_B_n]
+primary_parameters: [C_nn, C_rr, C_kk, B_A_n, B_B_n]
+
+training:
+  dgpo_epochs_per_refresh: 2
+  max_total_dgpo_epochs: 4
+  active_score_events: 4000
+  policy_training_events: 4000
+  monitor_events: 3000
+  score_epochs: 4
+  score_hidden_width: 32
+  score_hidden_layers: 2
+  batch_size: 512
+  group_size: 8
+  learning_rate: 0.0002
+  weight_decay: 1.0e-5
+  grad_clip_norm: 5.0
+  reward_scale: 10000.0
+
+validation:
+  score_training_events: 4000
+  evaluation_events: 6000
+  score_epochs: 4
+  score_hidden_width: 32
+  score_hidden_layers: 2
+  batch_size: 512
+  min_relative_J_improvement: 0.002
+  split_noise_multiplier: 2.0
+  early_stop_patience_attempts: 3
+  learning_rate_backoff: 0.5
+  retry_epochs: 1
+  max_retries_after_rejection: 1
+  direct_Cnn_bins: 12
+
+evaluation:
+  score_training_events: 4000
+  events: 6000
+  score_epochs: 4
+  score_hidden_width: 32
+  score_hidden_layers: 2
+  batch_size: 512
+  direct_Cnn_bins: 12
+  pseudo_template_events: 12000
+  pseudo_template_chunk_size: 4000
+  pseudo_experiments: 5
+  events_per_pseudo_experiment: 500
+  pseudo_bins: 12
+
+seed_offsets:
+  active_score: 1100000
+  policy_training: 1200000
+  policy_reconstruction: 1300000
+  policy_sampling: 1400000
+  monitor: 1500000
+  monitor_reconstruction: 1510000
+  validation_score_training: 1600000
+  validation_score_reconstruction: 1610000
+  validation_evaluation: 1700000
+  validation_reconstruction: 1710000
+  evaluation_score_training: 1800000
+  evaluation_score_reconstruction: 1810000
+  evaluation_events: 1900000
+  evaluation_reconstruction: 1910000
+  pseudo_templates: 2000000
+  pseudo_template_reconstruction: 2010000
+  pseudo_events: 2100000
+  pseudo_reconstruction: 2110000
+
+plots:
+  dpi: 80
+  export_svg: true
+
+allow_overwrite: false
