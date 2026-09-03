@@ -31,8 +31,8 @@ flow:
 
 training:
   batch_size: 4096
-  baseline_epochs: 40
-  score_epochs: 30
+  baseline_epochs: 80
+  score_epochs: 60
   learning_rate: 0.001
   weight_decay: 1.0e-5
   grad_clip_norm: 5.0
@@ -46,7 +46,7 @@ fisher_validation:
   relative_tolerance: 0.30
 
 dgpo:
-  epochs: 30
+  epochs: 60
   group_size: 8
   learning_rate: 0.0002
   weight_decay: 1.0e-5
@@ -56,11 +56,11 @@ dgpo:
   monitor_events: 20000
 
 refresh:
-  rounds: 6
+  rounds: 12
   dgpo_epochs_per_round: 5
   score_events: 200000
   fisher_events: 300000
-  score_epochs: 30
+  score_epochs: 60
   score_grid_points: 400
   direct_fisher_bins: 80
   beta_local: 0.10
@@ -79,6 +79,13 @@ ablation:
   diagnostic_score_events: 200000
   evaluation_events: 300000
   fisher_bin_counts: [20, 40, 60, 80, 100]
+  selection_bins: 80
+  validation_events: 300000
+  validation_event_seed_offset: 700000
+  validation_reconstruction_seed_offset: 710000
+  frozen_validation_interval_epochs: 5
+  early_stop_patience_rounds: 2
+  min_relative_fisher_improvement: 0.002
 
 inference:
   reco_bins: 30

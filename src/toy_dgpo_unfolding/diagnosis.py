@@ -20,10 +20,10 @@ from .ztautau import generate_events
 def _label(name: str) -> str:
     return {
         "baseline": "Baseline",
-        "fisher_dgpo_no_trust": "No trust",
-        "fisher_dgpo_trust": "Trust",
-        "iterative_refresh_trust": "Iterative refresh trust",
-        "iterative_refresh_no_trust": "Iterative refresh no trust",
+        "fisher_dgpo_no_trust": "Frozen score, no trust",
+        "fisher_dgpo_trust": "Frozen score, trust",
+        "iterative_refresh_trust": "Iterative refresh, trust",
+        "iterative_refresh_no_trust": "Iterative refresh, no trust",
     }.get(name, name.replace("_", " ").title())
 
 

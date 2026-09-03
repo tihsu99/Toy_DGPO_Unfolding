@@ -4,6 +4,7 @@ import copy
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 from tqdm.auto import tqdm
 
@@ -166,7 +167,6 @@ def _monitor_policy(
     reconstructed = reconstruct_policy(policy, monitor, config, generator)
     score = score_model(reconstructed["y"]) * reconstructed["valid"]
     information = float(score.square().sum())
-    score_sum = float(score.sum())
     with torch.no_grad():
         action = reconstructed["action"]
         kl = float((policy.log_prob(action, monitor["context"]) - reference_flow.log_prob(action, monitor["context"])).mean())
@@ -174,13 +174,81 @@ def _monitor_policy(
         angular_error = float(torch.acos(cosine).mean())
     return {
         "fisher": information,
+        "fisher_per_event": information / count,
         "predicted_sigma": information**-0.5 if information > 0.0 else float("inf"),
-        "score_balance": score_sum / information if information > 0.0 else float("nan"),
-        "bias_significance": abs(score_sum) / information**0.5 if information > 0.0 else float("nan"),
         "kl_to_reference": kl,
         "invalid_fraction": 1.0 - float(reconstructed["valid"].float().mean()),
         "angular_error": angular_error,
     }
+
+
+@torch.no_grad()
+def validation_fisher_metrics(
+    policy: ConditionalFlow,
+    baseline: ConditionalFlow,
+    active_score: ScoreModel,
+    events: dict[str, torch.Tensor],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Evaluate a policy on the one fixed, optimization-independent validation sample."""
+    bin_counts = [int(value) for value in config["ablation"]["fisher_bin_counts"]]
+    selected_bins = int(config["ablation"]["selection_bins"])
+    reconstructed = reconstruct_policy(
+        policy, events, config,
+        make_generator(
+            events["x"].device,
+            int(config["seed"]) + int(config["ablation"]["validation_reconstruction_seed_offset"]),
+        ),
+    )
+    x = events["x"].detach().cpu().numpy()
+    y = reconstructed["y"].detach().cpu().numpy()
+    valid = reconstructed["valid"].detach().cpu().numpy().astype(bool)
+    truth_weight_derivative = x / (1.0 + float(config["physics"]["nominal_C"]) * x)
+    fisher_per_event: list[float] = []
+    for bins in bin_counts:
+        edges = np.linspace(-1.0, 1.0, bins + 1)
+        indices = np.clip(np.searchsorted(edges, y[valid], side="right") - 1, 0, bins - 1)
+        counts = np.bincount(indices, minlength=bins)
+        derivatives = np.bincount(indices, weights=truth_weight_derivative[valid], minlength=bins)
+        fisher_per_event.append(float(np.sum(derivatives**2 / np.clip(counts, 1.0e-12, None)) / x.size))
+    selected_index = bin_counts.index(selected_bins)
+    selected_per_event = fisher_per_event[selected_index]
+    selected_total = selected_per_event * x.size
+    stability_values = [
+        value for bins, value in zip(bin_counts, fisher_per_event)
+        if bins in {40, 60, 80, 100}
+    ]
+    action = reconstructed["action"]
+    global_kl = float((
+        policy.log_prob(action, events["context"])
+        - baseline.log_prob(action, events["context"])
+    ).mean())
+    cosine = (reconstructed["k_a"] * events["k_true"]).sum(dim=-1).clamp(-1.0, 1.0)
+    score = active_score(reconstructed["y"]) * reconstructed["valid"]
+    return {
+        "validation_events": int(x.size),
+        "validation_fisher_bins": selected_bins,
+        "validation_fisher": selected_total,
+        "validation_fisher_per_event": selected_per_event,
+        "validation_sigma": selected_total**-0.5,
+        "validation_fisher_by_bin_count_per_event": fisher_per_event,
+        "validation_fisher_40_100_relative_spread": (
+            max(stability_values) / min(stability_values) - 1.0
+            if len(stability_values) > 1 and min(stability_values) > 0.0 else None
+        ),
+        "active_fisher_per_event": float(score.square().mean()),
+        "global_kl_to_baseline": global_kl,
+        "valid_fraction": float(reconstructed["valid"].float().mean()),
+        "angular_error": float(torch.acos(cosine).mean()),
+    }
+
+
+def _is_validation_improvement(candidate: float, best: float, minimum_relative: float) -> bool:
+    return candidate > best * (1.0 + minimum_relative)
+
+
+def _save_policy(model: ConditionalFlow, path: Path, **metadata: Any) -> None:
+    torch.save({"method_version": 3, **metadata, "state_dict": model.state_dict()}, path)
 
 
 def train_dgpo(
@@ -192,7 +260,9 @@ def train_dgpo(
     device: torch.device,
     name: str,
     kl_coefficient: float,
-) -> tuple[ConditionalFlow, list[dict[str, float]]]:
+    checkpoints: Path,
+    validation_events: dict[str, torch.Tensor],
+) -> tuple[ConditionalFlow, ConditionalFlow, list[dict[str, float]], list[dict[str, Any]]]:
     policy = copy.deepcopy(reference_flow).to(device).train()
     for parameter in policy.parameters():
         parameter.requires_grad_(True)
@@ -205,6 +275,18 @@ def train_dgpo(
     group_size = int(settings["group_size"])
     information_reference = reference["information"].sum().detach()
     history: list[dict[str, float]] = []
+    validation_history: list[dict[str, Any]] = []
+    policy_dir = checkpoints / name
+    policy_dir.mkdir(parents=True, exist_ok=True)
+    initial_metrics = validation_fisher_metrics(
+        policy.eval(), reference_flow, score_model, validation_events, config,
+    )
+    initial_metrics.update({"policy": name, "checkpoint": "epoch_000", "epoch": 0, "round": None})
+    validation_history.append(initial_metrics)
+    best_policy = copy.deepcopy(policy).eval()
+    best_fisher = float(initial_metrics["validation_fisher"])
+    best_epoch = 0
+    _save_policy(policy, policy_dir / "epoch_000_policy.pt", policy=name, epoch=0)
     progress = tqdm(range(int(settings["epochs"])), desc=name.replace("_", " "), unit="epoch")
     generator = make_generator(device, int(config["seed"]) + 30000)
     for epoch in progress:
@@ -243,7 +325,32 @@ def train_dgpo(
         history.append(metrics)
         policy.train()
         progress.set_postfix(reward=f"{metrics['reward']:.4g}", kl=f"{metrics['kl_to_reference']:.4g}", invalid=f"{metrics['invalid_fraction']:.3f}")
-    return policy.eval(), history
+        completed_epoch = epoch + 1
+        interval = int(config["ablation"]["frozen_validation_interval_epochs"])
+        if completed_epoch % interval == 0 or completed_epoch == int(settings["epochs"]):
+            validation = validation_fisher_metrics(
+                policy.eval(), reference_flow, score_model, validation_events, config,
+            )
+            validation.update({
+                "policy": name,
+                "checkpoint": f"epoch_{completed_epoch:03d}",
+                "epoch": completed_epoch,
+                "round": None,
+            })
+            validation_history.append(validation)
+            _save_policy(
+                policy, policy_dir / f"epoch_{completed_epoch:03d}_policy.pt",
+                policy=name, epoch=completed_epoch,
+            )
+            if float(validation["validation_fisher"]) > best_fisher:
+                best_fisher = float(validation["validation_fisher"])
+                best_epoch = completed_epoch
+                best_policy = copy.deepcopy(policy).eval()
+            policy.train()
+    final_policy = policy.eval()
+    _save_policy(final_policy, policy_dir / "final_policy.pt", policy=name, epoch=int(settings["epochs"]))
+    _save_policy(best_policy, policy_dir / "best_validation_policy.pt", policy=name, epoch=best_epoch)
+    return final_policy, best_policy, history, validation_history
 
 
 def train_local_dgpo_round(
@@ -364,9 +471,13 @@ def train_iterative_refresh(
     device: torch.device,
     name: str,
     checkpoints: Path,
+    validation_events: dict[str, torch.Tensor],
     beta_local_override: float | None = None,
     beta_global_override: float | None = None,
-) -> tuple[ConditionalFlow, ScoreModel, list[dict[str, float]], list[dict[str, Any]]]:
+) -> tuple[
+    ConditionalFlow, ConditionalFlow, ScoreModel, list[dict[str, float]],
+    list[dict[str, Any]], list[dict[str, Any]],
+]:
     refresh = config["refresh"]
     nominal_C = float(config["physics"]["nominal_C"])
     current = copy.deepcopy(baseline_reference).eval()
@@ -375,6 +486,14 @@ def train_iterative_refresh(
     round_dir = checkpoints / name
     round_dir.mkdir(parents=True, exist_ok=True)
     active_score: ScoreModel | None = None
+    validation_history: list[dict[str, Any]] = []
+    best_policy = copy.deepcopy(current).eval()
+    best_fisher = -float("inf")
+    best_round = 0
+    patience_reference = -float("inf")
+    rounds_without_improvement = 0
+    patience = int(config["ablation"]["early_stop_patience_rounds"])
+    minimum_relative = float(config["ablation"]["min_relative_fisher_improvement"])
 
     for round_index in range(int(refresh["rounds"])):
         score_events = generate_events(
@@ -386,6 +505,17 @@ def train_iterative_refresh(
             int(config["seed"]) + 210000 + 10000 * round_index,
             int(refresh["score_epochs"]), f"{name} score round {round_index + 1}",
         )
+        if round_index == 0:
+            initial_validation = validation_fisher_metrics(
+                current, baseline_reference, active_score, validation_events, config,
+            )
+            initial_validation.update({
+                "policy": name, "checkpoint": "pi_0", "epoch": 0, "round": 0,
+            })
+            validation_history.append(initial_validation)
+            best_fisher = float(initial_validation["validation_fisher"])
+            patience_reference = best_fisher
+            _save_policy(current, round_dir / "pi_00_policy.pt", policy=name, round=0, epoch=0)
         fisher_events = generate_events(
             int(refresh["fisher_events"]), nominal_C, config, device,
             make_generator(device, int(config["seed"]) + 220000 + 10000 * round_index),
@@ -430,6 +560,32 @@ def train_iterative_refresh(
             {"method_version": 3, "round": round_index, "state_dict": active_score.state_dict()},
             round_dir / f"round_{round_index:02d}_score.pt",
         )
+        completed_round = round_index + 1
+        validation = validation_fisher_metrics(
+            next_policy, baseline_reference, active_score, validation_events, config,
+        )
+        validation.update({
+            "policy": name,
+            "checkpoint": f"pi_{completed_round}",
+            "epoch": completed_round * int(refresh["dgpo_epochs_per_round"]),
+            "round": completed_round,
+        })
+        validation_history.append(validation)
+        _save_policy(
+            next_policy, round_dir / f"pi_{completed_round:02d}_policy.pt",
+            policy=name, round=completed_round,
+            epoch=completed_round * int(refresh["dgpo_epochs_per_round"]),
+        )
+        candidate_fisher = float(validation["validation_fisher"])
+        if candidate_fisher > best_fisher:
+            best_fisher = candidate_fisher
+            best_round = completed_round
+            best_policy = copy.deepcopy(next_policy).eval()
+        if _is_validation_improvement(candidate_fisher, patience_reference, minimum_relative):
+            patience_reference = candidate_fisher
+            rounds_without_improvement = 0
+        else:
+            rounds_without_improvement += 1
         rounds.append({
             "round": round_index,
             "score_loss": score_losses[-1],
@@ -446,7 +602,12 @@ def train_iterative_refresh(
         })
         history.extend(local_history)
         current = next_policy
+        if rounds_without_improvement >= patience:
+            break
 
     if active_score is None:
         raise RuntimeError("refresh.rounds must be positive")
-    return current, active_score, history, rounds
+    final_round = len(rounds)
+    _save_policy(current, round_dir / "final_policy.pt", policy=name, round=final_round)
+    _save_policy(best_policy, round_dir / "best_validation_policy.pt", policy=name, round=best_round)
+    return current, best_policy, active_score, history, rounds, validation_history

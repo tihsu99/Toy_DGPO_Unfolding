@@ -79,6 +79,13 @@ ablation:
   diagnostic_score_events: 3000
   evaluation_events: 4000
   fisher_bin_counts: [20, 40, 80]
+  selection_bins: 80
+  validation_events: 4000
+  validation_event_seed_offset: 700000
+  validation_reconstruction_seed_offset: 710000
+  frozen_validation_interval_epochs: 1
+  early_stop_patience_rounds: 2
+  min_relative_fisher_improvement: 0.002
 
 inference:
   reco_bins: 12

@@ -11,10 +11,12 @@ The implemented chain is:
 5. Reconstruct `y = c_A,reco c_B,reco` explicitly from each candidate tau four-momentum.
 6. Train `s_r(y) = E[t(X)|Y=y; pi_r]`, where `t(x)=x/(1+C0 x)`, and freeze it within each local update.
 7. Require pre-DGPO agreement among score Fisher, fine-binned Poisson Fisher, and nominal pseudo-experiment width.
-8. Compare the original 30-epoch frozen-score policy with an iterative policy that refreshes the score and Fisher reference before each short update. Both use the exact event-replacement Fisher reward; the iterative local trust is `KL(pi_phi || pi_r)`.
-9. Fit independent off-nominal pseudo-data with nominal-only, analytically reweighted, reconstructed-level Poisson templates.
+8. Compare the complete frozen/iterative x trust/no-trust 2x2 ablation. Both use the exact event-replacement Fisher reward; iterative trust is local `KL(pi_phi || pi_r)` and global `KL(pi_phi || pi_0)` remains diagnostic only.
+9. Select checkpoints only with an independent fixed nominal validation sample and the configured 80-bin direct reconstructed-level Fisher, then fit separate off-nominal pseudo-data with independently calibrated Poisson templates.
 
 The final parameter estimate and its asymmetric 68% interval come from the Poisson forward-folding likelihood and `Delta(-2 log L)=1`. The pipeline deliberately stops before DGPO if the pre-training Fisher closure gate fails.
+
+Metric roles are deliberately separated: active surrogate Fisher and reward are training quantities; an independently re-estimated policy-score Fisher is a refresh diagnostic; high-statistics direct binned validation Fisher selects the checkpoint; and the independent pseudo-experiment `Std(C_hat)` is the final scientific validation. Final pseudo-experiments are run once after selection and never participate in early stopping.
 
 ## Install and check the GPU
 
@@ -78,11 +80,13 @@ The output directory contains the resolved YAML, versioned checkpoints, Fisher g
 
 The `ablation_study/` subdirectory contains the controlled 2x2 score-refresh and KL-trust comparison:
 
-- the eight focused figures `01_ablation_fisher.png` through `08_final_ablation_dashboard.png`
+- `00_training_diagnostics.png`, the focused figures `01_ablation_fisher.png` through `08_final_ablation_dashboard.png`, and `09_checkpoint_selection_summary.png`
 - `final_ablation_metrics.csv`, `final_ablation_metrics.json`, and `ablation_report.md`
 - per-round stale-gap CSV/JSON and independent diagnostic score checkpoints for both iterative policies
 
-Round-aligned reference-policy, updated-policy, and active-score checkpoints are stored under `checkpoints/iterative_refresh_*/`. The ablation configuration enforces all five policies, equal 30-epoch optimized budgets, zero global KL, and a direct-Fisher convergence scan reaching at least 80 reconstructed-y bins.
+Validation histories and best/final comparisons are written to `checkpoint_validation_*.json`, `checkpoint_validation_*.csv`, and `checkpoint_selection_summary.{json,csv}`. Each optimized-policy checkpoint directory contains both `best_validation_policy.pt` and `final_policy.pt`; the root policy checkpoint used by downstream inference is always the best-validation version.
+
+Round-aligned reference-policy, updated-policy, and active-score checkpoints are stored under `checkpoints/iterative_refresh_*/`. The default maximum budget is 60 optimized epochs (12 refresh rounds x 5 epochs), with configurable two-round patience and a 0.2% validation-Fisher improvement threshold. The ablation enforces all five policies, equal maximum optimized budgets, zero global KL in the loss, and a 40/60/80/100-bin stability scan around the primary 80-bin selection value.
 
 `config/smoke.yaml` is a software-path test only. Its small ensemble cannot establish scientific coverage.
 

@@ -16,6 +16,7 @@ from .inference import binned_fisher_per_event, fit_poisson, reweighted_template
 from .training import (
     make_flow, make_reference_reconstruction, reconstruct_policy, slice_events,
     train_baseline, train_dgpo, train_iterative_refresh, train_reference_score,
+    validation_fisher_metrics,
 )
 from .ztautau import generate_events
 
@@ -221,6 +222,54 @@ def _write_history(output: Path, histories: dict[str, list[dict[str, float]]]) -
             writer.writerows(rows)
 
 
+def _write_checkpoint_validation(
+    output: Path,
+    histories: dict[str, list[dict[str, Any]]],
+    baseline_row: dict[str, Any],
+) -> None:
+    combined: list[dict[str, Any]] = []
+    for name, rows in histories.items():
+        combined.extend(rows)
+        with (output / f"checkpoint_validation_{name}.json").open("w", encoding="utf-8") as stream:
+            json.dump(rows, stream, indent=2)
+        with (output / f"checkpoint_validation_{name}.csv").open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
+    with (output / "checkpoint_validation_all.json").open("w", encoding="utf-8") as stream:
+        json.dump([baseline_row, *combined], stream, indent=2)
+
+    baseline_fisher = float(baseline_row["validation_fisher"])
+    baseline_sigma = float(baseline_row["validation_sigma"])
+    summary: list[dict[str, Any]] = []
+    for name, rows in histories.items():
+        best = max(rows, key=lambda row: float(row["validation_fisher"]))
+        final = rows[-1]
+        for role, row in (("best", best), ("final", final)):
+            summary.append({
+                "policy": name,
+                "checkpoint_role": role,
+                "checkpoint": row["checkpoint"],
+                "epoch": row["epoch"],
+                "round": row["round"],
+                "validation_fisher": row["validation_fisher"],
+                "validation_fisher_per_event": row["validation_fisher_per_event"],
+                "validation_sigma": row["validation_sigma"],
+                "validation_fisher_40_100_relative_spread": row["validation_fisher_40_100_relative_spread"],
+                "fisher_gain_vs_baseline": float(row["validation_fisher"]) / baseline_fisher - 1.0,
+                "predicted_sigma_reduction": 1.0 - float(row["validation_sigma"]) / baseline_sigma,
+                "global_kl_to_baseline": row["global_kl_to_baseline"],
+                "valid_fraction": row["valid_fraction"],
+                "angular_error": row["angular_error"],
+            })
+    with (output / "checkpoint_selection_summary.json").open("w", encoding="utf-8") as stream:
+        json.dump(summary, stream, indent=2)
+    with (output / "checkpoint_selection_summary.csv").open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(summary[0]))
+        writer.writeheader()
+        writer.writerows(summary)
+
+
 def _write_refresh_artifacts(
     output: Path,
     checkpoints: Path,
@@ -262,6 +311,10 @@ def _write_refresh_artifacts(
         "score_curve_rms_changes": score_shifts,
         "score_refresh_changed_model": all(value > 0.0 for value in score_shifts),
         "configured_total_dgpo_epochs": int(config["refresh"]["rounds"]) * int(config["refresh"]["dgpo_epochs_per_round"]),
+        "actual_refresh_rounds": len(rounds),
+        "actual_total_dgpo_epochs": len(rounds) * int(config["refresh"]["dgpo_epochs_per_round"]),
+        "stopped_before_maximum_rounds": len(rounds) < int(config["refresh"]["rounds"]),
+        "selection_metric": f"independent_{int(config['ablation']['selection_bins'])}_bin_validation_fisher",
     }
     with (output / f"refresh_invariants_{name}.json").open("w", encoding="utf-8") as stream:
         json.dump(invariants, stream, indent=2)
@@ -285,36 +338,71 @@ def train_pipeline(
         )
         raise RuntimeError(f"Pre-DGPO Fisher closure failed: relative spread {fisher_validation['relative_spread']:.3f} exceeds tolerance")
     reference_train = make_reference_reconstruction(reference_flow, score_model, train_events, config, int(config["seed"]) + 23000)
+    validation_events = generate_events(
+        int(config["ablation"]["validation_events"]), float(config["physics"]["nominal_C"]),
+        config, device, make_generator(
+            device, int(config["seed"]) + int(config["ablation"]["validation_event_seed_offset"]),
+        ),
+    )
+    baseline_validation = validation_fisher_metrics(
+        reference_flow, reference_flow, score_model, validation_events, config,
+    )
+    baseline_validation.update({
+        "policy": "baseline", "checkpoint": "pi_0", "epoch": 0, "round": 0,
+    })
+    baseline_dir = checkpoints / "baseline"
+    baseline_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {"method_version": 3, "policy": "baseline", "state_dict": reference_flow.state_dict()},
+        baseline_dir / "best_validation_policy.pt",
+    )
+    torch.save(
+        {"method_version": 3, "policy": "baseline", "state_dict": reference_flow.state_dict()},
+        baseline_dir / "final_policy.pt",
+    )
     policies: dict[str, ConditionalFlow] = {"baseline": reference_flow}
     histories: dict[str, list[dict[str, float]]] = {}
+    validation_histories: dict[str, list[dict[str, Any]]] = {}
     if config["policies"].get("fisher_dgpo_no_trust", False):
-        policies["fisher_dgpo_no_trust"], histories["fisher_dgpo_no_trust"] = train_dgpo(
+        _, policies["fisher_dgpo_no_trust"], histories["fisher_dgpo_no_trust"], validation_histories["fisher_dgpo_no_trust"] = train_dgpo(
             reference_flow, score_model, train_events, reference_train, config, device,
-            "fisher_dgpo_no_trust", float(config["dgpo"]["no_trust_kl_coefficient"]),
+            "fisher_dgpo_no_trust", float(config["dgpo"]["no_trust_kl_coefficient"]), checkpoints,
+            validation_events,
         )
     if config["policies"].get("fisher_dgpo_trust", False):
-        policies["fisher_dgpo_trust"], histories["fisher_dgpo_trust"] = train_dgpo(
+        _, policies["fisher_dgpo_trust"], histories["fisher_dgpo_trust"], validation_histories["fisher_dgpo_trust"] = train_dgpo(
             reference_flow, score_model, train_events, reference_train, config, device,
-            "fisher_dgpo_trust", float(config["dgpo"]["trust_kl_coefficient"]),
+            "fisher_dgpo_trust", float(config["dgpo"]["trust_kl_coefficient"]), checkpoints,
+            validation_events,
         )
     if config["policies"].get("iterative_refresh_trust", False):
-        policy, active_score, refresh_history, rounds = train_iterative_refresh(
+        _, policy, active_score, refresh_history, rounds, validation_rows = train_iterative_refresh(
             reference_flow, train_events, config, device, "iterative_refresh_trust", checkpoints,
+            validation_events,
         )
         policies["iterative_refresh_trust"] = policy
         histories["iterative_refresh_trust"] = refresh_history
+        validation_histories["iterative_refresh_trust"] = validation_rows
         _write_refresh_artifacts(output, checkpoints, config, "iterative_refresh_trust", active_score, rounds, refresh_history)
     if config["policies"].get("iterative_refresh_no_trust", False):
-        policy, active_score, refresh_history, rounds = train_iterative_refresh(
-            reference_flow, train_events, config, device, "iterative_refresh_no_trust", checkpoints, 0.0, 0.0,
+        _, policy, active_score, refresh_history, rounds, validation_rows = train_iterative_refresh(
+            reference_flow, train_events, config, device, "iterative_refresh_no_trust", checkpoints,
+            validation_events, 0.0, 0.0,
         )
         policies["iterative_refresh_no_trust"] = policy
         histories["iterative_refresh_no_trust"] = refresh_history
+        validation_histories["iterative_refresh_no_trust"] = validation_rows
         _write_refresh_artifacts(output, checkpoints, config, "iterative_refresh_no_trust", active_score, rounds, refresh_history)
     if config["policies"].get("fisher_dgpo_trust_bias_control", False):
         raise RuntimeError("Bias-control policy is intentionally disabled until the three primary policies establish score imbalance")
     _save_models(policies, score_model, checkpoints)
     _write_history(output, histories)
+    ordered_validation_histories = {
+        name: validation_histories[name]
+        for name in config["ablation"]["policy_order"]
+        if name != "baseline" and name in validation_histories
+    }
+    _write_checkpoint_validation(output, ordered_validation_histories, baseline_validation)
     return policies, score_model, histories, fisher_validation, baseline_calibration
 
 

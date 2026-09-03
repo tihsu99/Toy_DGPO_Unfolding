@@ -19,8 +19,8 @@ from .ztautau import candidate_reconstruction, generate_events
 def _label(name: str) -> str:
     labels = {
         "baseline": "Baseline",
-        "fisher_dgpo_no_trust": "Fisher DGPO, no trust",
-        "fisher_dgpo_trust": "Fisher DGPO, trust",
+        "fisher_dgpo_no_trust": "Frozen score, no trust",
+        "fisher_dgpo_trust": "Frozen score, trust",
         "iterative_refresh_trust": "Iterative refresh, trust",
         "iterative_refresh_no_trust": "Iterative refresh, no trust",
         "fisher_dgpo_trust_bias_control": "Fisher DGPO, trust + balance",
@@ -304,10 +304,9 @@ def _plot_training(histories: dict[str, list[dict[str, float]]], config: dict[st
     metrics = [
         ("fisher", "Fisher"), ("predicted_sigma", r"Predicted $\sigma_C$"),
         ("reward", "Replacement reward"), ("kl_to_reference", r"$D_{KL}(q_\phi||q_{ref})$"),
-        ("score_balance", r"$U/I$"), ("bias_significance", r"$|U|/\sqrt{I}$"),
         ("invalid_fraction", "Invalid fraction"), ("angular_error", "Tau-axis error [rad]"),
     ]
-    fig, axes = plt.subplots(2, 4, figsize=(17.0, 7.5))
+    fig, axes = plt.subplots(2, 3, figsize=(14.0, 7.5))
     for axis, (key, title) in zip(axes.flat, metrics):
         for name, rows in histories.items():
             if rows:

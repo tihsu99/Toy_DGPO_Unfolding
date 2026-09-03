@@ -44,6 +44,16 @@ def load_config(path: str | Path) -> dict[str, Any]:
         bin_counts = [int(value) for value in config["ablation"]["fisher_bin_counts"]]
         if not bin_counts or max(bin_counts) < 80:
             raise ValueError("The ablation requires a direct Fisher result with at least 80 bins")
+        if int(config["ablation"]["selection_bins"]) not in bin_counts:
+            raise ValueError("ablation.selection_bins must be present in ablation.fisher_bin_counts")
+        if int(config["ablation"]["validation_events"]) < 1:
+            raise ValueError("ablation.validation_events must be positive")
+        if int(config["ablation"]["frozen_validation_interval_epochs"]) < 1:
+            raise ValueError("ablation.frozen_validation_interval_epochs must be positive")
+        if int(config["ablation"]["early_stop_patience_rounds"]) < 1:
+            raise ValueError("ablation.early_stop_patience_rounds must be positive")
+        if float(config["ablation"]["min_relative_fisher_improvement"]) < 0.0:
+            raise ValueError("ablation.min_relative_fisher_improvement must be non-negative")
     if not config["policies"].get("baseline", False):
         raise ValueError("policies.baseline must be enabled because it defines the frozen reference")
     if not 0.0 < float(config["physics"]["nominal_C"]) < 1.0:

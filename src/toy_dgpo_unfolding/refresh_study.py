@@ -18,11 +18,27 @@ from .ztautau import generate_events
 def _label(name: str) -> str:
     return {
         "baseline": "Baseline",
-        "fisher_dgpo_no_trust": "Frozen no-trust",
-        "fisher_dgpo_trust": "Frozen trust",
-        "iterative_refresh_no_trust": "Refresh no-trust",
-        "iterative_refresh_trust": "Refresh trust",
+        "fisher_dgpo_no_trust": "Frozen score, no trust",
+        "fisher_dgpo_trust": "Frozen score, trust",
+        "iterative_refresh_no_trust": "Iterative refresh, no trust",
+        "iterative_refresh_trust": "Iterative refresh, trust",
     }[name]
+
+
+def _style(name: str) -> dict[str, Any]:
+    colors = {
+        "fisher_dgpo_no_trust": "tab:orange",
+        "fisher_dgpo_trust": "tab:blue",
+        "iterative_refresh_no_trust": "tab:red",
+        "iterative_refresh_trust": "tab:green",
+    }
+    no_trust = name.endswith("no_trust")
+    return {
+        "color": colors[name],
+        "linestyle": "--" if no_trust else "-",
+        "marker": "o" if no_trust else "s",
+        "markerfacecolor": "none" if no_trust else colors[name],
+    }
 
 
 def _load_flow(path: Path, config: dict[str, Any], device: torch.device) -> ConditionalFlow:
@@ -75,23 +91,26 @@ def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
 
 def _roundwise_diagnostics(
     names: list[str], policies: dict[str, ConditionalFlow], config: dict[str, Any],
-    device: torch.device, checkpoints: Path, output: Path,
-) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[np.ndarray]], dict[str, ScoreModel], dict[str, ScoreModel]]:
+    device: torch.device, checkpoints: Path, output: Path, reference_score: ScoreModel,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[np.ndarray]], dict[str, ScoreModel]]:
     settings = config["ablation"]
     refresh = config["refresh"]
     nominal_C = float(config["physics"]["nominal_C"])
-    rounds = int(refresh["rounds"])
     bin_counts = [int(value) for value in settings["fisher_bin_counts"]]
+    selection_index = bin_counts.index(int(settings["selection_bins"]))
     grid = torch.linspace(-1.0, 1.0, int(refresh["score_grid_points"]), device=device)
     rows_by_policy: dict[str, list[dict[str, Any]]] = {}
     curves_by_policy: dict[str, list[np.ndarray]] = {}
     final_active: dict[str, ScoreModel] = {}
     final_diagnostic: dict[str, ScoreModel] = {}
+    with (output.parent / "checkpoint_selection_summary.json").open(encoding="utf-8") as stream:
+        selection_summary = json.load(stream)
 
     for name in names:
         rows: list[dict[str, Any]] = []
         curves: list[np.ndarray] = []
         round_dir = checkpoints / name
+        rounds = len(list(round_dir.glob("round_*_updated_policy.pt")))
         for round_index in range(rounds):
             reference = _load_flow(round_dir / f"round_{round_index:02d}_reference_policy.pt", config, device)
             updated = _load_flow(round_dir / f"round_{round_index:02d}_updated_policy.pt", config, device)
@@ -110,10 +129,12 @@ def _roundwise_diagnostics(
                 output / f"diagnostic_score_{name}_round_{round_index:02d}.pt",
             )
             evaluation_events = generate_events(
-                int(settings["evaluation_events"]), nominal_C, config, device,
-                make_generator(device, int(config["seed"]) + 520000 + 10000 * round_index),
+                int(settings["validation_events"]), nominal_C, config, device,
+                make_generator(
+                    device, int(config["seed"]) + int(settings["validation_event_seed_offset"]),
+                ),
             )
-            reconstruction_seed = int(config["seed"]) + 530000 + 10000 * round_index
+            reconstruction_seed = int(config["seed"]) + int(settings["validation_reconstruction_seed_offset"])
             before = reconstruct_policy(reference, evaluation_events, config, make_generator(device, reconstruction_seed))
             after = reconstruct_policy(updated, evaluation_events, config, make_generator(device, reconstruction_seed))
             with torch.no_grad():
@@ -143,9 +164,9 @@ def _roundwise_diagnostics(
                 "I_before_update_per_event": before_fisher,
                 "I_surrogate_after_update_per_event": surrogate_fisher,
                 "I_policy_after_update_per_event": policy_fisher,
-                "I_binned_after_update_per_event": binned[-1],
+                "I_binned_after_update_per_event": binned[selection_index],
                 "stale_gap": surrogate_fisher / policy_fisher - 1.0,
-                "binned_policy_gap": binned[-1] / policy_fisher - 1.0,
+                "score_to_direct_gap": policy_fisher / binned[selection_index] - 1.0,
                 "local_kl_to_round_reference": float(local_kl),
                 "global_kl_to_baseline": float(global_kl),
                 "valid_efficiency": float(valid.float().mean()),
@@ -163,27 +184,34 @@ def _roundwise_diagnostics(
         rows_by_policy[name] = rows
         curves_by_policy[name] = curves
         _write_rows(output / f"roundwise_{name}", rows)
+        best = next(
+            row for row in selection_summary
+            if row["policy"] == name and row["checkpoint_role"] == "best"
+        )
+        best_round = int(best["round"])
+        final_active[name] = reference_score if best_round == 0 else _load_score(
+            round_dir / f"round_{best_round - 1:02d}_score.pt", config, device,
+        )
     np.save(output / "score_grid.npy", grid.detach().cpu().numpy())
-    return rows_by_policy, curves_by_policy, final_active, final_diagnostic
+    return rows_by_policy, curves_by_policy, final_active
 
 
 def _final_diagnostics(
-    names: list[str], iterative_names: list[str], policies: dict[str, ConditionalFlow],
-    reference_score: ScoreModel, final_active: dict[str, ScoreModel], final_diagnostic: dict[str, ScoreModel],
+    names: list[str], policies: dict[str, ConditionalFlow],
+    reference_score: ScoreModel, final_active: dict[str, ScoreModel],
     summaries: list[dict[str, Any]], config: dict[str, Any], device: torch.device, output: Path,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     settings = config["ablation"]
     refresh = config["refresh"]
     nominal_C = float(config["physics"]["nominal_C"])
     bin_counts = [int(value) for value in settings["fisher_bin_counts"]]
+    selection_index = bin_counts.index(int(settings["selection_bins"]))
     score_events = generate_events(
         int(settings["diagnostic_score_events"]), nominal_C, config, device,
         make_generator(device, int(config["seed"]) + 600000),
     )
-    policy_scores = dict(final_diagnostic)
+    policy_scores: dict[str, ScoreModel] = {}
     for name in names:
-        if name in iterative_names:
-            continue
         policy_scores[name], _, _ = rebuild_policy_score(
             policies[name], score_events, config, device, int(config["seed"]) + 610000,
             int(refresh["score_epochs"]), f"final diagnostic: {_label(name)}",
@@ -192,7 +220,10 @@ def _final_diagnostics(
             {"method_version": 3, "diagnostic_only": True, "state_dict": policy_scores[name].state_dict()},
             output / f"diagnostic_score_final_{name}.pt",
         )
-    active_scores = {name: final_active[name] if name in iterative_names else reference_score for name in names}
+    active_scores = {
+        name: final_active[name] if name.startswith("iterative_refresh") else reference_score
+        for name in names
+    }
     evaluation_events = generate_events(
         int(settings["evaluation_events"]), nominal_C, config, device,
         make_generator(device, int(config["seed"]) + 620000),
@@ -233,11 +264,21 @@ def _final_diagnostics(
         for name in names
     }
     baseline_sigma = float(nominal_rows["baseline"]["std_C_hat"])
+    with (output.parent / "checkpoint_validation_all.json").open(encoding="utf-8") as stream:
+        validation_rows = json.load(stream)
+    selected_validation = {
+        name: max(
+            (row for row in validation_rows if row["policy"] == name),
+            key=lambda row: float(row["validation_fisher"]),
+        )
+        for name in names
+    }
+    baseline_validation_fisher = float(selected_validation["baseline"]["validation_fisher"])
     metrics = []
     for name in names:
         values = raw[name]
         policy_rows = [row for row in summaries if row["policy"] == name]
-        direct = values["I_binned_by_bin_count"][-1]
+        direct = values["I_binned_by_bin_count"][selection_index]
         metrics.append({
             "policy": name,
             "I_s0_per_event": values["I_s0"],
@@ -248,12 +289,16 @@ def _final_diagnostics(
             "s0_fisher_gain": values["I_s0"] / baseline["I_s0"] - 1.0,
             "active_surrogate_fisher_gain": values["I_active"] / baseline["I_active"] - 1.0,
             "policy_score_fisher_gain": values["I_policy"] / baseline["I_policy"] - 1.0,
-            "direct_fisher_gain": direct / baseline["I_binned_by_bin_count"][-1] - 1.0,
+            "direct_fisher_gain": direct / baseline["I_binned_by_bin_count"][selection_index] - 1.0,
             "active_policy_stale_gap": values["I_active"] / values["I_policy"] - 1.0,
             "direct_policy_gap": direct / values["I_policy"] - 1.0,
             "nominal_std_C_hat": float(nominal_rows[name]["std_C_hat"]),
             "std_ratio_to_baseline": float(nominal_rows[name]["std_C_hat"]) / baseline_sigma,
             "Cnn_precision_gain": baseline_sigma / float(nominal_rows[name]["std_C_hat"]) - 1.0,
+            "validation_predicted_std_ratio": float(np.sqrt(
+                baseline_validation_fisher / float(selected_validation[name]["validation_fisher"])
+            )),
+            "observed_std_ratio": float(nominal_rows[name]["std_C_hat"]) / baseline_sigma,
             "max_abs_bias": float(max(abs(row["bias"]) for row in policy_rows)),
             "global_kl": values["global_kl"],
             "valid_efficiency": values["valid_efficiency"],
@@ -286,7 +331,14 @@ def _write_report(
             "",
         ])
     lines.extend([
-        "All optimized policies use the same configured total DGPO epoch budget. No bias, truth-reconstruction, parameter-distance, policy-to-baseline clipping, or global-anchor term is used.",
+        "All optimized policies use the same configured maximum DGPO epoch budget; iterative policies may stop earlier by the validation-Fisher patience rule. No bias, truth-reconstruction, parameter-distance, policy-to-baseline clipping, or global-anchor term is used.",
+        "",
+        "## Metric roles and statistical separation",
+        "",
+        "- Active surrogate Fisher and replacement reward are training quantities only.",
+        "- Independently re-estimated policy-score Fisher is a refresh-boundary diagnostic only.",
+        "- Fixed high-statistics direct binned validation Fisher selects the checkpoint.",
+        "- Independent Poisson pseudo-experiment Std(C_hat) is the final scientific validation and is evaluated only after selection.",
         "",
         "## Q1: Does refresh reduce the no-trust surrogate gap?",
         "",
@@ -303,7 +355,8 @@ def _write_report(
     for row in metrics:
         lines.append(
             f"- **{_label(row['policy'])}:** policy-score gain {100 * row['policy_score_fisher_gain']:+.2f}%, "
-            f"direct-Fisher gain {100 * row['direct_fisher_gain']:+.2f}%, actual nominal Cnn precision gain {100 * row['Cnn_precision_gain']:+.2f}%."
+            f"direct-Fisher gain {100 * row['direct_fisher_gain']:+.2f}%, actual nominal Cnn precision gain {100 * row['Cnn_precision_gain']:+.2f}%; "
+            f"validation-predicted Std ratio {row['validation_predicted_std_ratio']:.4f}, observed nominal Std ratio {row['observed_std_ratio']:.4f}."
         )
     lines.extend([
         "",
@@ -335,7 +388,9 @@ def _plot_ablation_fisher(
     axes[0].tick_params(axis="x", rotation=16)
     axes[0].legend(frameon=False, fontsize=8)
     for row in metrics:
-        axes[1].plot(bin_counts, row["I_binned_by_bin_count"], marker="o", label=_label(row["policy"]))
+        name = row["policy"]
+        style = {"color": "black", "linestyle": ":", "marker": "x"} if name == "baseline" else _style(name)
+        axes[1].plot(bin_counts, row["I_binned_by_bin_count"], label=_label(name), **style)
     axes[1].set(xlabel="Reconstructed-y bins", ylabel="Direct Fisher / event", title="Binned-Fisher convergence")
     axes[1].legend(frameon=False, fontsize=8)
     fig.tight_layout()
@@ -348,7 +403,7 @@ def _plot_roundwise_gaps(rows: dict[str, list[dict[str, Any]]], config: dict[str
     for axis, (name, policy_rows) in zip(axes, rows.items()):
         rounds = [row["round"] for row in policy_rows]
         axis.plot(rounds, [row["stale_gap"] for row in policy_rows], marker="o", label=r"$I_{surrogate}/I_{policy}-1$")
-        axis.plot(rounds, [row["binned_policy_gap"] for row in policy_rows], marker="s", label=r"$I_{bin}/I_{policy}-1$")
+        axis.plot(rounds, [row["score_to_direct_gap"] for row in policy_rows], marker="s", label=r"$I_{refreshed}/I_{bin}^{val}-1$")
         axis.axhline(0.0, color="black", linestyle="--", linewidth=0.8)
         axis.set(xlabel="Refresh round", title=_label(name))
         axis.legend(frameon=False, fontsize=8)
@@ -359,17 +414,25 @@ def _plot_roundwise_gaps(rows: dict[str, list[dict[str, Any]]], config: dict[str
 
 
 def _plot_roundwise_information(rows: dict[str, list[dict[str, Any]]], config: dict[str, Any], output: Path) -> None:
-    fields = (
-        ("I_before_update_per_event", "Before update"),
-        ("I_surrogate_after_update_per_event", "Active surrogate after"),
-        ("I_policy_after_update_per_event", "Policy score after"),
-        ("I_binned_after_update_per_event", "Direct binned after"),
-    )
     fig, axes = plt.subplots(1, 2, figsize=(12.0, 4.6), sharey=True)
     for axis, (name, policy_rows) in zip(axes, rows.items()):
-        for field, label in fields:
-            axis.plot([row["round"] for row in policy_rows], [row[field] for row in policy_rows], marker="o", label=label)
-        axis.set(xlabel="Refresh round", title=_label(name))
+        first = True
+        for row in policy_rows:
+            round_index = row["round"]
+            values = [
+                row["I_surrogate_after_update_per_event"],
+                row["I_policy_after_update_per_event"],
+                row["I_binned_after_update_per_event"],
+            ]
+            axis.plot([round_index] * 3, values, color="0.65", linewidth=1.0, zorder=1)
+            axis.scatter(round_index, values[0], marker="o", color="tab:orange", zorder=3,
+                         label="Old surrogate on updated policy" if first else None)
+            axis.scatter(round_index, values[1], marker="s", color="tab:green", zorder=3,
+                         label="Refreshed policy score" if first else None)
+            axis.scatter(round_index, values[2], marker="D", color="black", zorder=3,
+                         label="Direct validation Fisher" if first else None)
+            first = False
+        axis.set(xlabel="Refresh boundary", title=_label(name))
         axis.legend(frameon=False, fontsize=7)
     axes[0].set_ylabel("Fisher / event")
     fig.tight_layout()
@@ -381,15 +444,16 @@ def _plot_policy_drift(
     names: list[str], histories: dict[str, list[dict[str, float]]], config: dict[str, Any], output: Path,
 ) -> None:
     fig, axis = plt.subplots(figsize=(9.0, 5.4))
-    colors = plt.get_cmap("tab10")(np.linspace(0.0, 0.8, len(names)))
-    for color, name in zip(colors, names):
+    for name in names:
         rows = histories[name]
         epochs = [row["epoch"] for row in rows]
+        style = _style(name)
         if name.startswith("iterative_refresh"):
-            axis.plot(epochs, [row["global_kl_monitor"] for row in rows], color=color, marker="o", label=f"{_label(name)}: global")
-            axis.plot(epochs, [row["kl_to_reference"] for row in rows], color=color, linestyle="--", label=f"{_label(name)}: local")
+            axis.plot(epochs, [row["global_kl_monitor"] for row in rows], label=f"{_label(name)}: global", **style)
+            local_style = {**style, "linestyle": ":", "marker": None}
+            axis.plot(epochs, [row["kl_to_reference"] for row in rows], label=f"{_label(name)}: local", **local_style)
         else:
-            axis.plot(epochs, [row["kl_to_reference"] for row in rows], color=color, label=_label(name))
+            axis.plot(epochs, [row["kl_to_reference"] for row in rows], label=_label(name), **style)
     axis.axhline(0.0, color="black", linewidth=0.7)
     axis.set(xlabel="Total DGPO epoch", ylabel="Sampled KL diagnostic", title="Global drift and current-round local drift")
     axis.legend(frameon=False, fontsize=7, ncol=2)
@@ -449,8 +513,9 @@ def _plot_precision(
     for name in names:
         rows = sorted((row for row in summaries if row["policy"] == name), key=lambda row: row["C_true"])
         truth = [row["C_true"] for row in rows]
-        axes[0].plot(truth, [row["std_C_hat"] for row in rows], marker="o", label=_label(name))
-        axes[1].plot(truth, [row["std_C_hat"] / baseline[row["C_true"]]["std_C_hat"] for row in rows], marker="o", label=_label(name))
+        style = {"color": "black", "linestyle": ":", "marker": "x"} if name == "baseline" else _style(name)
+        axes[0].plot(truth, [row["std_C_hat"] for row in rows], label=_label(name), **style)
+        axes[1].plot(truth, [row["std_C_hat"] / baseline[row["C_true"]]["std_C_hat"] for row in rows], label=_label(name), **style)
     axes[0].set(ylabel=r"Std$(\hat C_{nn})$")
     axes[0].legend(frameon=False, fontsize=8, ncol=2)
     axes[1].axhline(1.0, color="black", linestyle="--")
@@ -486,6 +551,101 @@ def _plot_dashboard(metrics: list[dict[str, Any]], config: dict[str, Any], outpu
     plt.close(fig)
 
 
+def _plot_training_dashboard(
+    names: list[str], histories: dict[str, list[dict[str, float]]],
+    config: dict[str, Any], root_output: Path, output: Path,
+) -> None:
+    with (root_output / "checkpoint_validation_all.json").open(encoding="utf-8") as stream:
+        validation_rows = json.load(stream)
+    baseline = next(row for row in validation_rows if row["policy"] == "baseline")
+    optimized = [name for name in names if name != "baseline"]
+    panels = (
+        ("active", "Active/local surrogate Fisher / event"),
+        ("direct", "Independent direct validation Fisher / event"),
+        ("sigma", r"Validation $\sigma_C=1/\sqrt{I_{bin}^{val}}$"),
+        ("reward", "Replacement reward"),
+        ("local_kl", "Local KL diagnostic"),
+        ("global_kl", r"Global KL to $\pi_0$"),
+        ("invalid_fraction", "Invalid fraction"),
+        ("angular_error", "Tau-axis error [rad]"),
+    )
+    fig, axes = plt.subplots(2, 4, figsize=(19.0, 8.2))
+    for axis, (panel, title) in zip(axes.flat, panels):
+        for name in optimized:
+            rows = histories[name]
+            style = _style(name)
+            if panel in {"direct", "sigma"}:
+                selected = [row for row in validation_rows if row["policy"] == name]
+                key = "validation_fisher_per_event" if panel == "direct" else "validation_sigma"
+                marker_style = {**style, "linestyle": "none"}
+                axis.plot(
+                    [row["epoch"] for row in selected], [row[key] for row in selected],
+                    markersize=5, label=_label(name), **marker_style,
+                )
+                continue
+            if panel == "active":
+                key = "fisher_per_event"
+            elif panel == "reward":
+                key = "reward"
+            elif panel == "local_kl":
+                key = "kl_to_reference"
+            elif panel == "global_kl":
+                key = "global_kl_monitor" if name.startswith("iterative_refresh") else "kl_to_reference"
+            else:
+                key = panel
+            axis.plot(
+                [row["epoch"] for row in rows], [row[key] for row in rows],
+                markersize=2.5, markevery=max(1, len(rows) // 12), label=_label(name), **style,
+            )
+        if panel == "active":
+            axis.axhline(baseline["active_fisher_per_event"], color="black", linestyle=":", label="Baseline")
+        elif panel == "direct":
+            axis.axhline(baseline["validation_fisher_per_event"], color="black", linestyle=":", label="Baseline")
+        elif panel == "sigma":
+            axis.axhline(baseline["validation_sigma"], color="black", linestyle=":", label="Baseline")
+        elif panel == "invalid_fraction":
+            axis.axhline(1.0 - baseline["valid_fraction"], color="black", linestyle=":", label="Baseline")
+        elif panel == "angular_error":
+            axis.axhline(baseline["angular_error"], color="black", linestyle=":", label="Baseline")
+        axis.set(xlabel="Total DGPO epoch", ylabel=title)
+        axis.grid(alpha=0.2)
+    axes[0, 0].legend(frameon=False, fontsize=7)
+    fig.suptitle("Complete 2x2 training diagnostics; validation markers are independent checkpoints")
+    fig.tight_layout()
+    fig.savefig(output / "00_training_diagnostics.png", dpi=int(config["plots"]["dpi"]))
+    plt.close(fig)
+
+
+def _plot_checkpoint_summary(config: dict[str, Any], root_output: Path, output: Path) -> None:
+    with (root_output / "checkpoint_selection_summary.json").open(encoding="utf-8") as stream:
+        rows = json.load(stream)
+    columns = [
+        "Role", "Epoch / round", r"$I_{bin}^{val}$", r"$\sigma_{C,val}$", "I gain",
+        "Sigma reduction", "Global KL", "Valid", "Axis error",
+    ]
+    cells = []
+    row_labels = []
+    for row in rows:
+        location = f"{row['epoch']} / {row['round'] if row['round'] is not None else '-'}"
+        cells.append([
+            row["checkpoint_role"], location, f"{row['validation_fisher']:.5g}",
+            f"{row['validation_sigma']:.5g}", f"{100 * row['fisher_gain_vs_baseline']:+.2f}%",
+            f"{100 * row['predicted_sigma_reduction']:+.2f}%", f"{row['global_kl_to_baseline']:.4g}",
+            f"{row['valid_fraction']:.3f}", f"{row['angular_error']:.4f}",
+        ])
+        row_labels.append(_label(row["policy"]))
+    fig, axis = plt.subplots(figsize=(16.5, 5.8))
+    axis.axis("off")
+    table = axis.table(cellText=cells, rowLabels=row_labels, colLabels=columns, loc="center", cellLoc="center")
+    table.auto_set_font_size(False)
+    table.set_fontsize(7.5)
+    table.scale(1.0, 1.55)
+    axis.set_title("Best validation checkpoint versus final optimization checkpoint", pad=18)
+    fig.tight_layout()
+    fig.savefig(output / "09_checkpoint_selection_summary.png", dpi=int(config["plots"]["dpi"]))
+    plt.close(fig)
+
+
 def make_ablation_study(
     policies: dict[str, ConditionalFlow], reference_score: ScoreModel,
     histories: dict[str, list[dict[str, float]]], summaries: list[dict[str, Any]],
@@ -496,15 +656,16 @@ def make_ablation_study(
     optimized_names = [name for name in names if name != "baseline"]
     output = root_output / str(config["ablation"]["output_subdir"])
     output.mkdir(parents=True, exist_ok=True)
-    round_rows, curves, final_active, final_diagnostic = _roundwise_diagnostics(
-        iterative_names, policies, config, device, checkpoints, output,
+    round_rows, curves, final_active = _roundwise_diagnostics(
+        iterative_names, policies, config, device, checkpoints, output, reference_score,
     )
     metrics, final_sample = _final_diagnostics(
-        names, iterative_names, policies, reference_score, final_active, final_diagnostic,
+        names, policies, reference_score, final_active,
         summaries, config, device, output,
     )
     bin_counts = [int(value) for value in config["ablation"]["fisher_bin_counts"]]
     grid = np.load(output / "score_grid.npy")
+    _plot_training_dashboard(names, histories, config, root_output, output)
     _plot_ablation_fisher(metrics, bin_counts, config, output)
     _plot_roundwise_gaps(round_rows, config, output)
     _plot_roundwise_information(round_rows, config, output)
@@ -513,5 +674,6 @@ def make_ablation_study(
     _plot_responses(names, final_sample, config, output)
     _plot_precision(names, summaries, config, output)
     _plot_dashboard(metrics, config, output)
+    _plot_checkpoint_summary(config, root_output, output)
     _write_report(metrics, round_rows, summaries, output)
     return metrics
