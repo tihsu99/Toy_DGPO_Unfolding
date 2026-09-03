@@ -56,7 +56,7 @@ dgpo:
   monitor_events: 1000
 
 refresh:
-  rounds: 2
+  max_refresh_rounds: 2
   dgpo_epochs_per_round: 1
   score_events: 3000
   fisher_events: 4000
@@ -76,9 +76,16 @@ ablation:
     - fisher_dgpo_trust
     - iterative_refresh_no_trust
     - iterative_refresh_trust
+  summary_policy_order:
+    - fisher_dgpo_trust
+    - fisher_dgpo_no_trust
+    - iterative_refresh_trust
+    - iterative_refresh_no_trust
+  primary_candidate: iterative_refresh_no_trust
+  stability_ablation: iterative_refresh_trust
   diagnostic_score_events: 3000
   evaluation_events: 4000
-  fisher_bin_counts: [20, 40, 80]
+  fisher_bin_counts: [20, 40, 60, 80, 100]
   selection_bins: 80
   validation_events: 4000
   validation_event_seed_offset: 700000

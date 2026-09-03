@@ -495,7 +495,7 @@ def train_iterative_refresh(
     patience = int(config["ablation"]["early_stop_patience_rounds"])
     minimum_relative = float(config["ablation"]["min_relative_fisher_improvement"])
 
-    for round_index in range(int(refresh["rounds"])):
+    for round_index in range(int(refresh["max_refresh_rounds"])):
         score_events = generate_events(
             int(refresh["score_events"]), nominal_C, config, device,
             make_generator(device, int(config["seed"]) + 200000 + 10000 * round_index),
@@ -606,7 +606,7 @@ def train_iterative_refresh(
             break
 
     if active_score is None:
-        raise RuntimeError("refresh.rounds must be positive")
+        raise RuntimeError("refresh.max_refresh_rounds must be positive")
     final_round = len(rounds)
     _save_policy(current, round_dir / "final_policy.pt", policy=name, round=final_round)
     _save_policy(best_policy, round_dir / "best_validation_policy.pt", policy=name, round=best_round)

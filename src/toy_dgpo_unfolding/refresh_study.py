@@ -11,6 +11,7 @@ import torch
 
 from .core import ScoreModel, make_generator
 from .flow import ConditionalFlow
+from .inference import reweighted_binned_fisher_per_event
 from .training import make_flow, rebuild_policy_score, reconstruct_policy
 from .ztautau import generate_events
 
@@ -290,6 +291,9 @@ def _final_diagnostics(
             "active_surrogate_fisher_gain": values["I_active"] / baseline["I_active"] - 1.0,
             "policy_score_fisher_gain": values["I_policy"] / baseline["I_policy"] - 1.0,
             "direct_fisher_gain": direct / baseline["I_binned_by_bin_count"][selection_index] - 1.0,
+            "best_validation_fisher_gain": (
+                float(selected_validation[name]["validation_fisher"]) / baseline_validation_fisher - 1.0
+            ),
             "active_policy_stale_gap": values["I_active"] / values["I_policy"] - 1.0,
             "direct_policy_gap": direct / values["I_policy"] - 1.0,
             "nominal_std_C_hat": float(nominal_rows[name]["std_C_hat"]),
@@ -298,6 +302,9 @@ def _final_diagnostics(
             "validation_predicted_std_ratio": float(np.sqrt(
                 baseline_validation_fisher / float(selected_validation[name]["validation_fisher"])
             )),
+            "predicted_precision_gain": float(np.sqrt(
+                float(selected_validation[name]["validation_fisher"]) / baseline_validation_fisher
+            ) - 1.0),
             "observed_std_ratio": float(nominal_rows[name]["std_C_hat"]) / baseline_sigma,
             "max_abs_bias": float(max(abs(row["bias"]) for row in policy_rows)),
             "global_kl": values["global_kl"],
@@ -440,6 +447,183 @@ def _plot_roundwise_information(rows: dict[str, list[dict[str, Any]]], config: d
     plt.close(fig)
 
 
+def _plot_roundwise_refresh_closure(
+    rows: dict[str, list[dict[str, Any]]], config: dict[str, Any], output: Path,
+) -> None:
+    fig, axes = plt.subplots(len(rows), 2, figsize=(13.0, 4.2 * len(rows)), squeeze=False)
+    for row_index, (name, policy_rows) in enumerate(rows.items()):
+        information_axis, gap_axis = axes[row_index]
+        sequence_x: list[float] = []
+        sequence_y: list[float] = []
+        for item in policy_rows:
+            boundary = float(item["round"])
+            offsets = (-0.22, 0.0, 0.22)
+            values = (
+                item["I_surrogate_after_update_per_event"],
+                item["I_policy_after_update_per_event"],
+                item["I_binned_after_update_per_event"],
+            )
+            sequence_x.extend(boundary + offset for offset in offsets)
+            sequence_y.extend(values)
+        information_axis.plot(sequence_x, sequence_y, color="0.7", linewidth=1.0, zorder=1)
+        for offset, key, marker, color, label in (
+            (-0.22, "I_surrogate_after_update_per_event", "o", "tab:orange", "Old surrogate"),
+            (0.0, "I_policy_after_update_per_event", "s", "tab:green", "Refreshed score"),
+            (0.22, "I_binned_after_update_per_event", "D", "black", "Direct validation"),
+        ):
+            information_axis.scatter(
+                [float(item["round"]) + offset for item in policy_rows],
+                [item[key] for item in policy_rows], marker=marker, color=color, label=label, zorder=3,
+            )
+        boundaries = [item["round"] for item in policy_rows]
+        gap_axis.plot(
+            boundaries, [item["stale_gap"] for item in policy_rows], marker="o",
+            label=r"$I_{old}/I_{refreshed}-1$",
+        )
+        gap_axis.plot(
+            boundaries, [item["score_to_direct_gap"] for item in policy_rows], marker="s",
+            label=r"$I_{refreshed}/I_{bin}^{val}-1$",
+        )
+        gap_axis.axhline(0.0, color="black", linestyle="--", linewidth=0.8)
+        information_axis.set(
+            xlabel="Refresh boundary", ylabel="Fisher / event",
+            title=f"{_label(name)}: boundary sawtooth",
+        )
+        gap_axis.set(
+            xlabel="Refresh boundary", ylabel="Relative mismatch",
+            title=f"{_label(name)}: closure gaps",
+        )
+        information_axis.legend(frameon=False, fontsize=8)
+        gap_axis.legend(frameon=False, fontsize=8)
+    fig.tight_layout()
+    fig.savefig(output / "roundwise_refresh_closure.png", dpi=int(config["plots"]["dpi"]))
+    plt.close(fig)
+
+
+def _plot_validation_early_stopping(
+    names: list[str], config: dict[str, Any], root_output: Path, output: Path,
+) -> None:
+    with (root_output / "checkpoint_validation_all.json").open(encoding="utf-8") as stream:
+        validation_rows = json.load(stream)
+    with (root_output / "checkpoint_selection_summary.json").open(encoding="utf-8") as stream:
+        selection_rows = json.load(stream)
+    optimized = [name for name in names if name != "baseline"]
+    baseline = next(row for row in validation_rows if row["policy"] == "baseline")
+    best = {
+        row["policy"]: row for row in selection_rows if row["checkpoint_role"] == "best"
+    }
+    final = {
+        row["policy"]: row for row in selection_rows if row["checkpoint_role"] == "final"
+    }
+    fig, axes = plt.subplots(1, 2, figsize=(14.0, 5.2))
+    for name in optimized:
+        rows = [row for row in validation_rows if row["policy"] == name]
+        style = _style(name)
+        epochs = [row["epoch"] for row in rows]
+        fisher = [row["validation_fisher_per_event"] for row in rows]
+        sigma = [row["validation_sigma"] for row in rows]
+        axes[0].plot(epochs, fisher, label=_label(name), **style)
+        axes[1].plot(epochs, sigma, label=_label(name), **style)
+        for axis, key in zip(axes, ("validation_fisher_per_event", "validation_sigma")):
+            axis.scatter(best[name]["epoch"], best[name][key], marker="*", s=140,
+                         color=style["color"], edgecolor="black", zorder=5)
+            axis.scatter(final[name]["epoch"], final[name][key], marker="X", s=75,
+                         color=style["color"], edgecolor="black", zorder=5)
+            if name.startswith("iterative_refresh") and int(final[name]["round"]) < int(config["refresh"]["max_refresh_rounds"]):
+                axis.scatter(final[name]["epoch"], final[name][key], marker="v", s=170,
+                             facecolor="none", edgecolor=style["color"], linewidth=1.5, zorder=6)
+    axes[0].axhline(baseline["validation_fisher_per_event"], color="black", linestyle=":", label="Baseline")
+    axes[1].axhline(baseline["validation_sigma"], color="black", linestyle=":", label="Baseline")
+    axes[0].set(xlabel="Total DGPO epoch", ylabel="Direct validation Fisher / event")
+    axes[1].set(xlabel="Total DGPO epoch", ylabel=r"Predicted $\sigma_C$")
+    axes[0].legend(frameon=False, fontsize=8)
+    axes[1].text(0.02, 0.98, "star: best   X: final   open triangle: patience stop",
+                 transform=axes[1].transAxes, va="top", fontsize=8)
+    fig.suptitle("Checkpoint selection uses only fixed independent 80-bin validation Fisher")
+    fig.tight_layout()
+    fig.savefig(output / "validation_early_stopping.png", dpi=int(config["plots"]["dpi"]))
+    plt.close(fig)
+
+
+def _fisher_vs_pe_by_C(
+    names: list[str], policies: dict[str, ConditionalFlow], summaries: list[dict[str, Any]],
+    config: dict[str, Any], device: torch.device, output: Path,
+) -> list[dict[str, Any]]:
+    settings = config["ablation"]
+    nominal_C = float(config["physics"]["nominal_C"])
+    target_values = np.asarray(config["physics"]["true_C_values"], dtype=float)
+    events = generate_events(
+        int(settings["validation_events"]), nominal_C, config, device,
+        make_generator(device, int(config["seed"]) + int(settings["validation_event_seed_offset"])),
+    )
+    reconstruction_seed = int(config["seed"]) + int(settings["validation_reconstruction_seed_offset"])
+    edges = np.linspace(-1.0, 1.0, int(settings["selection_bins"]) + 1)
+    exposure = float(config["data"]["events_per_pseudo_experiment"])
+    summary_map = {(row["policy"], float(row["C_true"])): row for row in summaries}
+    fisher_by_policy: dict[str, np.ndarray] = {}
+    for name in names:
+        reconstructed = reconstruct_policy(
+            policies[name], events, config, make_generator(device, reconstruction_seed),
+        )
+        fisher_by_policy[name] = reweighted_binned_fisher_per_event(
+            events["x"].detach().cpu().numpy(),
+            reconstructed["y"].detach().cpu().numpy(),
+            reconstructed["valid"].detach().cpu().numpy().astype(bool),
+            edges, nominal_C, target_values,
+        )
+    rows: list[dict[str, Any]] = []
+    for name in names:
+        for value_index, target_C in enumerate(target_values):
+            per_event = float(fisher_by_policy[name][value_index])
+            sigma_fisher = float(1.0 / np.sqrt(per_event * exposure))
+            pe_std = float(summary_map[(name, float(target_C))]["std_C_hat"])
+            baseline_fisher = float(fisher_by_policy["baseline"][value_index])
+            baseline_std = float(summary_map[("baseline", float(target_C))]["std_C_hat"])
+            predicted_std_ratio = float(np.sqrt(baseline_fisher / per_event))
+            observed_std_ratio = pe_std / baseline_std
+            rows.append({
+                "policy": name,
+                "C_true": float(target_C),
+                "validation_events": int(settings["validation_events"]),
+                "selection_bins": int(settings["selection_bins"]),
+                "pseudo_experiment_exposure": int(exposure),
+                "I_bin_per_event": per_event,
+                "I_bin_total": per_event * exposure,
+                "sigma_fisher": sigma_fisher,
+                "PE_std": pe_std,
+                "closure_ratio_PE_std_over_sigma_fisher": pe_std / sigma_fisher,
+                "predicted_std_ratio_to_baseline": predicted_std_ratio,
+                "observed_std_ratio_to_baseline": observed_std_ratio,
+                "predicted_precision_gain": 1.0 / predicted_std_ratio - 1.0,
+                "observed_PE_precision_gain": 1.0 / observed_std_ratio - 1.0,
+            })
+    _write_rows(output / "fisher_vs_PE_by_C", rows)
+    fig, axes = plt.subplots(1, 3, figsize=(18.0, 5.2))
+    for name in names:
+        selected = [row for row in rows if row["policy"] == name]
+        style = {"color": "black", "linestyle": ":", "marker": "x"} if name == "baseline" else _style(name)
+        values = [row["C_true"] for row in selected]
+        axes[0].plot(values, [row["sigma_fisher"] for row in selected], label=_label(name), **style)
+        pe_style = {**style, "linestyle": "none", "marker": "+"}
+        axes[0].plot(values, [row["PE_std"] for row in selected], **pe_style)
+        axes[1].plot(values, [row["closure_ratio_PE_std_over_sigma_fisher"] for row in selected], label=_label(name), **style)
+        axes[2].plot(values, [row["predicted_std_ratio_to_baseline"] for row in selected], label=_label(name), **style)
+        observed_style = {**style, "linestyle": "none", "marker": "+"}
+        axes[2].plot(values, [row["observed_std_ratio_to_baseline"] for row in selected], **observed_style)
+    axes[0].set(xlabel=r"$C_{true}$", ylabel=r"$\sigma(C)$", title="Lines: Fisher prediction; +: PE spread")
+    axes[1].axhline(1.0, color="black", linestyle="--")
+    axes[1].set(xlabel=r"$C_{true}$", ylabel=r"PE Std / $\sigma_{Fisher}$", title="Fisher-to-PE closure")
+    axes[2].axhline(1.0, color="black", linestyle="--")
+    axes[2].set(xlabel=r"$C_{true}$", ylabel="Std ratio to baseline", title="Lines: predicted; +: observed")
+    axes[0].legend(frameon=False, fontsize=7)
+    axes[1].legend(frameon=False, fontsize=7)
+    axes[2].legend(frameon=False, fontsize=7)
+    fig.tight_layout()
+    fig.savefig(output / "fisher_vs_PE_by_C.png", dpi=int(config["plots"]["dpi"]))
+    plt.close(fig)
+    return rows
+
+
 def _plot_policy_drift(
     names: list[str], histories: dict[str, list[dict[str, float]]], config: dict[str, Any], output: Path,
 ) -> None:
@@ -548,6 +732,45 @@ def _plot_dashboard(metrics: list[dict[str, Any]], config: dict[str, Any], outpu
     axis.set_title("Controlled 2x2 score-refresh and KL-trust ablation", pad=20)
     fig.tight_layout()
     fig.savefig(output / "08_final_ablation_dashboard.png", dpi=int(config["plots"]["dpi"]))
+    plt.close(fig)
+
+
+def _plot_final_2x2_ablation(
+    metrics: list[dict[str, Any]], config: dict[str, Any], output: Path,
+) -> None:
+    by_name = {row["policy"]: row for row in metrics}
+    order = [str(name) for name in config["ablation"]["summary_policy_order"]]
+    columns = [
+        "Best val. I gain", "Final policy-score I gain", "Final direct I gain",
+        "Predicted precision gain", "Observed PE precision gain", "Global KL",
+        "Valid efficiency", "Tau-axis error [deg]",
+    ]
+    cells = []
+    for name in order:
+        row = by_name[name]
+        cells.append([
+            f"{100 * row['best_validation_fisher_gain']:+.2f}%",
+            f"{100 * row['policy_score_fisher_gain']:+.2f}%",
+            f"{100 * row['direct_fisher_gain']:+.2f}%",
+            f"{100 * row['predicted_precision_gain']:+.2f}%",
+            f"{100 * row['Cnn_precision_gain']:+.2f}%",
+            f"{row['global_kl']:.4g}",
+            f"{row['valid_efficiency']:.3f}",
+            f"{np.degrees(row['angular_error']):.3f}",
+        ])
+    fig, axis = plt.subplots(figsize=(16.8, 4.8))
+    axis.axis("off")
+    table = axis.table(
+        cellText=cells, rowLabels=[_label(name) for name in order],
+        colLabels=columns, loc="center", cellLoc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(7.7)
+    table.scale(1.0, 1.8)
+    candidate = _label(str(config["ablation"]["primary_candidate"]))
+    axis.set_title(f"Final 2x2 ablation; {candidate} is the primary candidate", pad=20)
+    fig.tight_layout()
+    fig.savefig(output / "final_2x2_ablation.png", dpi=int(config["plots"]["dpi"]))
     plt.close(fig)
 
 
@@ -669,11 +892,15 @@ def make_ablation_study(
     _plot_ablation_fisher(metrics, bin_counts, config, output)
     _plot_roundwise_gaps(round_rows, config, output)
     _plot_roundwise_information(round_rows, config, output)
+    _plot_roundwise_refresh_closure(round_rows, config, output)
+    _plot_validation_early_stopping(names, config, root_output, output)
     _plot_policy_drift(optimized_names, histories, config, output)
     _plot_score_evolution(curves, grid, config, output)
     _plot_responses(names, final_sample, config, output)
     _plot_precision(names, summaries, config, output)
+    _fisher_vs_pe_by_C(names, policies, summaries, config, device, output)
     _plot_dashboard(metrics, config, output)
+    _plot_final_2x2_ablation(metrics, config, output)
     _plot_checkpoint_summary(config, root_output, output)
     _write_report(metrics, round_rows, summaries, output)
     return metrics

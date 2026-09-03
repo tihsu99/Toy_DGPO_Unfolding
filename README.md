@@ -77,6 +77,10 @@ The output directory contains the resolved YAML, versioned checkpoints, Fisher g
 - `diagnosis_metrics.csv`, `17_offnominal_detailed.csv`, `diagnosis_metrics.json`, and `diagnosis.md`
 - `19_extended_score_closure.png` through `23_asimov_likelihood_examples.png`
 - `extended_score_closure.csv`, `template_closure_metrics.csv`, and `statistical_closure.json`
+- `ablation_study/roundwise_refresh_closure.png`
+- `ablation_study/validation_early_stopping.png`
+- `ablation_study/fisher_vs_PE_by_C.png` plus its CSV/JSON values
+- `ablation_study/final_2x2_ablation.png`
 
 The `ablation_study/` subdirectory contains the controlled 2x2 score-refresh and KL-trust comparison:
 
@@ -88,7 +92,7 @@ The main comparison plots and the ablation plots are both regenerated during eva
 
 Validation histories and best/final comparisons are written to `checkpoint_validation_*.json`, `checkpoint_validation_*.csv`, and `checkpoint_selection_summary.{json,csv}`. Each optimized-policy checkpoint directory contains both `best_validation_policy.pt` and `final_policy.pt`; the root policy checkpoint used by downstream inference is always the best-validation version.
 
-Round-aligned reference-policy, updated-policy, and active-score checkpoints are stored under `checkpoints/iterative_refresh_*/`. The default maximum budget is 60 optimized epochs (12 refresh rounds x 5 epochs), with configurable two-round patience and a 0.2% validation-Fisher improvement threshold. The ablation enforces all five policies, equal maximum optimized budgets, zero global KL in the loss, and a 40/60/80/100-bin stability scan around the primary 80-bin selection value.
+Round-aligned reference-policy, updated-policy, and active-score checkpoints are stored under `checkpoints/iterative_refresh_*/`. The default maximum budget is 50 optimized epochs (`max_refresh_rounds: 10`, five epochs per round), with configurable two-round patience and a 0.2% validation-Fisher improvement threshold. The ablation enforces all five policies, equal maximum optimized budgets, zero global KL in the loss, and a 20/40/60/80/100-bin stability scan around the primary 80-bin selection value.
 
 `config/smoke.yaml` is a software-path test only. Its small ensemble cannot establish scientific coverage.
 

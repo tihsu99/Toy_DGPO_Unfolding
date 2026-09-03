@@ -314,10 +314,10 @@ def _write_refresh_artifacts(
         ),
         "score_curve_rms_changes": score_shifts,
         "score_refresh_changed_model": all(value > 0.0 for value in score_shifts),
-        "configured_total_dgpo_epochs": int(config["refresh"]["rounds"]) * int(config["refresh"]["dgpo_epochs_per_round"]),
+        "configured_total_dgpo_epochs": int(config["refresh"]["max_refresh_rounds"]) * int(config["refresh"]["dgpo_epochs_per_round"]),
         "actual_refresh_rounds": len(rounds),
         "actual_total_dgpo_epochs": len(rounds) * int(config["refresh"]["dgpo_epochs_per_round"]),
-        "stopped_before_maximum_rounds": len(rounds) < int(config["refresh"]["rounds"]),
+        "stopped_before_maximum_rounds": len(rounds) < int(config["refresh"]["max_refresh_rounds"]),
         "selection_metric": f"independent_{int(config['ablation']['selection_bins'])}_bin_validation_fisher",
     }
     with (output / f"refresh_invariants_{name}.json").open("w", encoding="utf-8") as stream:

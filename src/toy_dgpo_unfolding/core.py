@@ -24,8 +24,8 @@ def load_config(path: str | Path) -> dict[str, Any]:
         raise ValueError(f"Missing configuration sections: {sorted(missing)}")
     if int(config["dgpo"]["group_size"]) < 2:
         raise ValueError("dgpo.group_size must be at least two")
-    if int(config["refresh"]["rounds"]) < 1:
-        raise ValueError("refresh.rounds must be positive")
+    if int(config["refresh"]["max_refresh_rounds"]) < 1:
+        raise ValueError("refresh.max_refresh_rounds must be positive")
     if int(config["refresh"]["dgpo_epochs_per_round"]) < 1:
         raise ValueError("refresh.dgpo_epochs_per_round must be positive")
     if int(config["refresh"]["direct_fisher_bins"]) < 2:
@@ -36,7 +36,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
         if disabled:
             raise ValueError(f"The enabled ablation requires these policies: {disabled}")
         frozen_epochs = int(config["dgpo"]["epochs"])
-        refresh_epochs = int(config["refresh"]["rounds"]) * int(config["refresh"]["dgpo_epochs_per_round"])
+        refresh_epochs = int(config["refresh"]["max_refresh_rounds"]) * int(config["refresh"]["dgpo_epochs_per_round"])
         if frozen_epochs != refresh_epochs:
             raise ValueError("The ablation requires equal frozen and iterative DGPO epoch budgets")
         if float(config["refresh"]["beta_global"]) != 0.0:
@@ -54,6 +54,13 @@ def load_config(path: str | Path) -> dict[str, Any]:
             raise ValueError("ablation.early_stop_patience_rounds must be positive")
         if float(config["ablation"]["min_relative_fisher_improvement"]) < 0.0:
             raise ValueError("ablation.min_relative_fisher_improvement must be non-negative")
+        summary_policies = list(config["ablation"]["summary_policy_order"])
+        expected_summary = required_policies.difference({"baseline"})
+        if len(summary_policies) != len(set(summary_policies)) or set(summary_policies) != expected_summary:
+            raise ValueError("ablation.summary_policy_order must contain each optimized policy exactly once")
+        for key in ("primary_candidate", "stability_ablation"):
+            if config["ablation"][key] not in expected_summary:
+                raise ValueError(f"ablation.{key} must name an optimized policy")
     if not config["policies"].get("baseline", False):
         raise ValueError("policies.baseline must be enabled because it defines the frozen reference")
     if not 0.0 < float(config["physics"]["nominal_C"]) < 1.0:

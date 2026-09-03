@@ -106,3 +106,32 @@ def binned_fisher_per_event(
     probability = counts / nominal_x.size
     probability_derivative = derivatives / nominal_x.size
     return float(np.sum(probability_derivative**2 / np.clip(probability, 1.0e-12, None)))
+
+
+def reweighted_binned_fisher_per_event(
+    nominal_x: np.ndarray,
+    nominal_y: np.ndarray,
+    valid: np.ndarray,
+    edges: np.ndarray,
+    nominal_C: float,
+    target_C_values: np.ndarray,
+) -> np.ndarray:
+    """Compute extended-Poisson binned Fisher at each target C by exact reweighting."""
+    x = nominal_x[valid]
+    y = nominal_y[valid]
+    bins = np.clip(np.searchsorted(edges, y, side="right") - 1, 0, edges.size - 2)
+    denominator = 1.0 + nominal_C * x
+    probability_derivative = np.bincount(
+        bins, weights=x / denominator, minlength=edges.size - 1,
+    ).astype(float) / nominal_x.size
+    values = []
+    for target_C in np.asarray(target_C_values, dtype=float):
+        probability = np.bincount(
+            bins,
+            weights=(1.0 + target_C * x) / denominator,
+            minlength=edges.size - 1,
+        ).astype(float) / nominal_x.size
+        values.append(float(np.sum(
+            probability_derivative**2 / np.clip(probability, 1.0e-12, None),
+        )))
+    return np.asarray(values)
