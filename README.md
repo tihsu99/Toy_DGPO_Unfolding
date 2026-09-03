@@ -132,7 +132,24 @@ toy-dgpo spin-train --spin-config config/spin_matrix.yaml --device cuda
 toy-dgpo spin-evaluate --spin-config config/spin_matrix.yaml --device cuda
 ```
 
-The default joint target is `(C_nn, C_rr, C_kk)`. Its no-trust iterative reward minimizes the equal-weight normalized A-optimal covariance objective, using float64 Fisher matrices and the configured numerical-only ridge. BC5 is implemented by the same target-set machinery but remains disabled until the Cdiag conditioning and closure checks succeed; enable it through `multi_training.enabled_targets` in `config/spin_matrix.yaml`.
+The Cdiag configuration remains the independent `(C_nn, C_rr, C_kk)` study. Its checkpoints stay under `outputs/ztautau_spin_matrix/`; the original `C_nn` study stays under `outputs/ztautau/`.
+
+The polarization extension uses the decorrelated basis
+
+```text
+B_plus_n  = (B_A_n + B_B_n) / sqrt(2)
+B_minus_n = (B_A_n - B_B_n) / sqrt(2)
+```
+
+and the dedicated BC5 target `(C_nn, C_rr, C_kk, B_plus_n, B_minus_n)`. Run it only after the independent Cdiag checkpoint exists:
+
+```bash
+toy-dgpo spin-run --spin-config config/spin_bc5.yaml --device cuda
+```
+
+This writes to `outputs/ztautau_spin_bc5/` and refuses to overwrite an existing controlled checkpoint directory unless `multi_training.allow_overwrite` is explicitly enabled. The fixed and adaptive controllers use the same maximum DGPO budget. The reward remains event-level rank-one replacement with grouped leave-one-out advantage and no KL term, but now minimizes the baseline-whitened objective `Tr(F0 F^-1) / d` in float64.
+
+Adaptive refresh keeps one fixed nominal monitor sample separate from score training, policy optimization, round-reference construction, direct validation, and final evaluation. NMSE is only a warning. The refresh trigger is confirmed by drift in the independent joint binned validation Fisher, or forced by the configured maximum interval. Score models warm-start across refreshes; every third refresh also trains a fresh-init diagnostic score for path-dependence checks. Best BC5 checkpoints minimize independent direct-validation `J`, never NMSE or tau-axis error.
 
 The separate `outputs/ztautau_spin_matrix/` directory contains:
 
@@ -144,10 +161,24 @@ The separate `outputs/ztautau_spin_matrix/` directory contains:
 - `spin_matrix_summary.png`
 - full Fisher/eigenvalue/condition diagnostics and null-cross-talk CSV/JSON files
 
+The isolated BC5 workflow additionally writes:
+
+- `adaptive_refresh_diagnostics.png`
+- `fixed_vs_adaptive_refresh.png`
+- `BC5_profiled_precision.png`
+- `BC5_fisher_eigenmodes.png`
+- `full_spin_passive_transfer_after_BC5.png`
+- `multi_measurement_summary.png`
+
+Every figure has a CSV or JSON source-data companion. The baseline BC5 Fisher report includes `sigma(B_plus_n)`, `sigma(B_minus_n)`, and the full eigenvalue/eigenvector decomposition before policy training.
+
 ## Validation
 
 ```bash
 source .venv/bin/activate
 python -m unittest discover -s tests -v
 toy-dgpo run --config config/smoke.yaml --device cpu
+toy-dgpo spin-run --spin-config config/spin_bc5_smoke.yaml --device cpu
 ```
+
+The spin smoke commands require the preceding smoke `C_nn` and Cdiag checkpoints. Smoke outputs validate software paths only and are not physics-performance evidence.

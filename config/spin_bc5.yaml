@@ -1,6 +1,9 @@
 base_config: default.yaml
 cnn_output_dir: outputs/ztautau
-output_dir: outputs/ztautau_spin_matrix
+cdiag_output_dir: outputs/ztautau_spin_matrix
+cdiag_checkpoint_name: iterative_refresh_multi_no_trust
+require_cdiag_checkpoint: true
+output_dir: outputs/ztautau_spin_bc5
 
 study:
   score_events: 300000
@@ -16,18 +19,28 @@ study:
   response_bins: 30
 
 multi_training:
-  # Enable BC5 only after the Cdiag run has passed its conditioning and closure checks.
-  enabled_targets: [Cdiag]
-  primary_target: Cdiag
+  enabled_targets: [BC5]
+  primary_target: BC5
   target_sets:
     Cdiag: [C_nn, C_rr, C_kk]
     BC5: [C_nn, C_rr, C_kk, B_plus_n, B_minus_n]
-  equal_weights: true
+  refresh_modes: [fixed, adaptive]
+  primary_refresh_mode: adaptive
+  fixed_refresh_epochs: 5
+  min_epochs_between_refresh: 1
+  max_epochs_between_refresh: 6
+  nmse_ratio_warning: 1.10
+  fisher_closure_log_threshold: 0.05
+  direct_validation_interval_epochs: 1
+  max_dgpo_epochs: 50
   max_refresh_rounds: 10
   dgpo_epochs_per_round: 5
   score_events: 200000
   training_events: 150000
   validation_events: 300000
+  monitor_events: 100000
+  direct_validation_events: 400000
+  direct_fisher_bins_per_dimension: 4
   score_epochs: 60
   score_hidden_width: 96
   score_hidden_layers: 3
@@ -39,9 +52,18 @@ multi_training:
   reward_scale: 100000.0
   lambda_num: 1.0e-10
   condition_number_max: 1.0e8
+  eigenvalue_relative_tolerance: 1.0e-10
   early_stop_patience_rounds: 2
+  early_stop_patience_checks: 10
   min_relative_objective_improvement: 0.002
   compute_d_optimal_diagnostic: true
+  score_warm_start: true
+  warm_start_check_interval: 3
+  warm_start_mse_log_tolerance: 0.10
+  warm_start_closure_log_tolerance: 0.05
+  warm_start_curve_rms_tolerance: 0.10
+  score_curve_bins: 20
+  allow_overwrite: false
 
 seed_offsets:
   passive_score: 800000
@@ -52,6 +74,10 @@ seed_offsets:
   multi_training: 910000
   multi_validation: 920000
   multi_reconstruction: 930000
+  multi_monitor: 940000
+  multi_direct_validation: 950000
+  multi_monitor_reconstruction: 960000
+  multi_direct_reconstruction: 970000
 
 plots:
   dpi: 160
