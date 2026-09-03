@@ -1,0 +1,57 @@
+base_config: default.yaml
+cnn_output_dir: outputs/ztautau
+output_dir: outputs/ztautau_spin_matrix
+
+study:
+  score_events: 300000
+  evaluation_events: 500000
+  score_epochs: 60
+  score_hidden_width: 96
+  score_hidden_layers: 3
+  batch_size: 4096
+  condition_number_max: 1.0e8
+  eigenvalue_relative_tolerance: 1.0e-10
+  null_pseudo_experiments: 200
+  null_events_per_experiment: 20000
+  response_bins: 30
+
+multi_training:
+  # Enable BC5 only after the Cdiag run has passed its conditioning and closure checks.
+  enabled_targets: [Cdiag]
+  primary_target: Cdiag
+  target_sets:
+    Cdiag: [C_nn, C_rr, C_kk]
+    BC5: [C_nn, C_rr, C_kk, B_A_n, B_B_n]
+  equal_weights: true
+  max_refresh_rounds: 10
+  dgpo_epochs_per_round: 5
+  score_events: 200000
+  training_events: 150000
+  validation_events: 300000
+  score_epochs: 60
+  score_hidden_width: 96
+  score_hidden_layers: 3
+  batch_size: 2048
+  group_size: 8
+  learning_rate: 0.0002
+  weight_decay: 1.0e-5
+  grad_clip_norm: 5.0
+  reward_scale: 100000.0
+  lambda_num: 1.0e-10
+  condition_number_max: 1.0e8
+  early_stop_patience_rounds: 2
+  min_relative_objective_improvement: 0.002
+  compute_d_optimal_diagnostic: true
+
+seed_offsets:
+  passive_score: 800000
+  passive_evaluation: 810000
+  null_experiments: 820000
+  null_reconstruction: 830000
+  multi_score: 900000
+  multi_training: 910000
+  multi_validation: 920000
+  multi_reconstruction: 930000
+
+plots:
+  dpi: 160

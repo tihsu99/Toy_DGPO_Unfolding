@@ -90,6 +90,18 @@ def _visible_direction(cosine_n: torch.Tensor, n_axis: torch.Tensor, tau_axis: t
     return _normalize(cosine_n[..., None] * n_axis + radius[..., None] * (torch.cos(phi)[..., None] * tau_axis + torch.sin(phi)[..., None] * transverse))
 
 
+def polarimeter_components(
+    direction: torch.Tensor, normal_axis: torch.Tensor, tau_axis: torch.Tensor,
+) -> torch.Tensor:
+    """Return polarimeter components in the right-handed (r, n, k) basis."""
+    radial_axis = _normalize(torch.linalg.cross(normal_axis, tau_axis, dim=-1))
+    return torch.stack((
+        (direction * radial_axis).sum(dim=-1),
+        (direction * normal_axis).sum(dim=-1),
+        (direction * tau_axis).sum(dim=-1),
+    ), dim=-1)
+
+
 def _sample_beta22(count: int, device: torch.device, generator: torch.Generator, dtype: torch.dtype) -> torch.Tensor:
     accepted = torch.empty(0, device=device, dtype=dtype)
     while accepted.numel() < count:
@@ -131,6 +143,8 @@ def generate_events(count: int, C: float, config: dict[str, Any], device: torch.
     n_axis = _normalize(torch.linalg.cross(beam, k_a, dim=-1))
     direction_a_star = _visible_direction(c_a, n_axis, k_a, generator)
     direction_b_star = _visible_direction(c_b, n_axis, k_b, generator)
+    h_a_truth = polarimeter_components(direction_a_star, n_axis, k_a)
+    h_b_truth = polarimeter_components(direction_b_star, n_axis, k_b)
     if float(physics["visible_beta_alpha"]) != 2.0 or float(physics["visible_beta_beta"]) != 2.0:
         raise ValueError("The implemented minimal decay uses the specified Beta(2, 2) visible fraction")
     r_a = _sample_beta22(count, device, generator, physics_dtype)
@@ -160,7 +174,8 @@ def generate_events(count: int, C: float, config: dict[str, Any], device: torch.
     seed_e1, seed_e2 = tangent_basis(seed)
     target_action = sphere_log_map(seed, k_a, seed_e1, seed_e2)
     generated = {
-        "c_a": c_a, "c_b": c_b, "x": x, "k_true": k_a, "r_a": r_a, "r_b": r_b,
+        "c_a": c_a, "c_b": c_b, "x": x, "k_true": k_a,
+        "h_a_truth": h_a_truth, "h_b_truth": h_b_truth, "r_a": r_a, "r_b": r_b,
         "invisible_mass_a": torch.sqrt(minkowski_mass2(invisible_a_star).clamp_min(0.0)),
         "invisible_mass_b": torch.sqrt(minkowski_mass2(invisible_b_star).clamp_min(0.0)),
         "visible_true_a": visible_a, "visible_true_b": visible_b,
@@ -206,10 +221,13 @@ def candidate_reconstruction(events: dict[str, torch.Tensor], actions: torch.Ten
     normal = _normalize(normal_raw)
     direction_a_star = _normalize(visible_a_star[..., 1:])
     direction_b_star = _normalize(visible_b_star[..., 1:])
-    c_a = (direction_a_star * normal).sum(dim=-1).clamp(-1.0, 1.0)
-    c_b = (direction_b_star * normal).sum(dim=-1).clamp(-1.0, 1.0)
+    h_a_reco = polarimeter_components(direction_a_star, normal, k_a).clamp(-1.0, 1.0)
+    h_b_reco = polarimeter_components(direction_b_star, normal, k_b).clamp(-1.0, 1.0)
     result = {
-        "y": c_a * c_b, "valid": valid, "k_a": k_a,
+        "y": h_a_reco[..., 1] * h_b_reco[..., 1],
+        "h_a_reco": h_a_reco, "h_b_reco": h_b_reco,
+        "spin_features": torch.cat((h_a_reco, h_b_reco), dim=-1),
+        "valid": valid, "k_a": k_a,
         "mass2_a": minkowski_mass2(invisible_a), "mass2_b": minkowski_mass2(invisible_b),
     }
     return {key: value[:, 0] for key, value in result.items()} if squeeze else result

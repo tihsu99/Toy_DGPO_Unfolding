@@ -96,6 +96,54 @@ Round-aligned reference-policy, updated-policy, and active-score checkpoints are
 
 `config/smoke.yaml` is a software-path test only. Its small ensemble cannot establish scientific coverage.
 
+## Full spin-matrix extension
+
+The spin-matrix study is an additive workflow and never overwrites the existing `C_nn` checkpoints. Its right-handed convention is fixed to `(r, n, k)`, with
+
+```text
+n   = normalize(z_beam x k_A)
+k_A = k_A,  r_A = n x k_A
+k_B = -k_A, r_B = n x k_B
+```
+
+The saved truth and reconstructed polarimeters use component order `(h^r, h^n, h^k)`. Consequently, the original observable and score remain exactly
+
+```text
+x = h_A^n h_B^n
+t_Cnn = x / (1 + 0.60 x)
+```
+
+Run the passive 15-parameter impact, conditioning, correlation, and null-cross-talk study without training a policy:
+
+```bash
+toy-dgpo spin-passive --spin-config config/spin_matrix.yaml --device cuda
+```
+
+Train the separate Cdiag multi-measurement policy and then evaluate all comparisons:
+
+```bash
+toy-dgpo spin-run --spin-config config/spin_matrix.yaml --device cuda
+```
+
+Training and evaluation may also be separated:
+
+```bash
+toy-dgpo spin-train --spin-config config/spin_matrix.yaml --device cuda
+toy-dgpo spin-evaluate --spin-config config/spin_matrix.yaml --device cuda
+```
+
+The default joint target is `(C_nn, C_rr, C_kk)`. Its no-trust iterative reward minimizes the equal-weight normalized A-optimal covariance objective, using float64 Fisher matrices and the configured numerical-only ridge. BC5 is implemented by the same target-set machinery but remains disabled until the Cdiag conditioning and closure checks succeed; enable it through `multi_training.enabled_targets` in `config/spin_matrix.yaml`.
+
+The separate `outputs/ztautau_spin_matrix/` directory contains:
+
+- `spin_matrix_information_transfer.png`
+- `spin_matrix_correlations.png`
+- `multi_measurement_training.png`
+- `multi_measurement_tradeoff.png`
+- `cnn_vs_multitask_response.png`
+- `spin_matrix_summary.png`
+- full Fisher/eigenvalue/condition diagnostics and null-cross-talk CSV/JSON files
+
 ## Validation
 
 ```bash

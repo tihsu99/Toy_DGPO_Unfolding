@@ -63,7 +63,10 @@ def reconstruct_policy(
     candidates: int = 1,
 ) -> dict[str, torch.Tensor]:
     batch_size = int(config["training"]["batch_size"])
-    pieces: dict[str, list[torch.Tensor]] = {"action": [], "log_prob": [], "y": [], "valid": [], "k_a": []}
+    pieces: dict[str, list[torch.Tensor]] = {
+        "action": [], "log_prob": [], "y": [], "h_a_reco": [], "h_b_reco": [],
+        "spin_features": [], "valid": [], "k_a": [],
+    }
     for start in range(0, events["x"].numel(), batch_size):
         batch = slice_events(events, slice(start, start + batch_size))
         action, log_prob = flow.sample(batch["context"], candidates, generator)
@@ -71,6 +74,9 @@ def reconstruct_policy(
         pieces["action"].append(action)
         pieces["log_prob"].append(log_prob)
         pieces["y"].append(reconstruction["y"])
+        pieces["h_a_reco"].append(reconstruction["h_a_reco"])
+        pieces["h_b_reco"].append(reconstruction["h_b_reco"])
+        pieces["spin_features"].append(reconstruction["spin_features"])
         pieces["valid"].append(reconstruction["valid"])
         pieces["k_a"].append(reconstruction["k_a"])
     result = {key: torch.cat(value) for key, value in pieces.items()}
