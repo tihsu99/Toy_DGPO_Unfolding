@@ -84,6 +84,8 @@ The `ablation_study/` subdirectory contains the controlled 2x2 score-refresh and
 - `final_ablation_metrics.csv`, `final_ablation_metrics.json`, and `ablation_report.md`
 - per-round stale-gap CSV/JSON and independent diagnostic score checkpoints for both iterative policies
 
+The main comparison plots and the ablation plots are both regenerated during evaluation. Their method order comes from `ablation.policy_order`; evaluation fails instead of silently producing a partial comparison if any enabled checkpoint or summary is missing.
+
 Validation histories and best/final comparisons are written to `checkpoint_validation_*.json`, `checkpoint_validation_*.csv`, and `checkpoint_selection_summary.{json,csv}`. Each optimized-policy checkpoint directory contains both `best_validation_policy.pt` and `final_policy.pt`; the root policy checkpoint used by downstream inference is always the best-validation version.
 
 Round-aligned reference-policy, updated-policy, and active-score checkpoints are stored under `checkpoints/iterative_refresh_*/`. The default maximum budget is 60 optimized epochs (12 refresh rounds x 5 epochs), with configurable two-round patience and a 0.2% validation-Fisher improvement threshold. The ablation enforces all five policies, equal maximum optimized budgets, zero global KL in the loss, and a 40/60/80/100-bin stability scan around the primary 80-bin selection value.

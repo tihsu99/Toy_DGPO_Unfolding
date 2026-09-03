@@ -86,6 +86,19 @@ def make_generator(device: torch.device, seed: int) -> torch.Generator:
     return generator
 
 
+def comparison_policy_names(config: dict[str, Any], available: Any) -> list[str]:
+    """Return enabled comparison policies in configured order and reject partial plots."""
+    available_names = set(available)
+    names = [
+        str(name) for name in config["ablation"]["policy_order"]
+        if config["policies"].get(name, False)
+    ]
+    missing = [name for name in names if name not in available_names]
+    if missing:
+        raise RuntimeError(f"Cannot make a complete policy comparison; missing: {missing}")
+    return names
+
+
 def truth_score(x: torch.Tensor, nominal_C: float) -> torch.Tensor:
     return x / (1.0 + nominal_C * x)
 

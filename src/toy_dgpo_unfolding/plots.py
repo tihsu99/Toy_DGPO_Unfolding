@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from matplotlib.colors import Normalize
 
-from .core import ScoreModel, make_generator, truth_score
+from .core import ScoreModel, comparison_policy_names, make_generator, truth_score
 from .flow import ConditionalFlow
 from .training import slice_events
 from .ztautau import candidate_reconstruction, generate_events
@@ -253,54 +253,65 @@ def _plot_candidate_display(
     events: dict[str, torch.Tensor], policies: dict[str, ConditionalFlow], score_model: ScoreModel,
     calibrations: dict[str, dict[str, torch.Tensor]], config: dict[str, Any], device: torch.device, output: Path,
 ) -> None:
-    name = "fisher_dgpo_trust" if "fisher_dgpo_trust" in policies else list(policies)[-1]
+    names = comparison_policy_names(config, policies)[1:]
     count = min(int(config["plots"]["candidate_display_events"]), events["x"].numel())
     selected = slice_events(events, slice(0, count))
     group_size = int(config["dgpo"]["group_size"])
-    generator = make_generator(device, int(config["seed"]) + 71000)
-    actions, _ = policies[name].sample(selected["context"], group_size, generator)
-    candidates = candidate_reconstruction(selected, actions, config)
-    score = score_model(candidates["y"]) * candidates["valid"]
-    information = score.square()
     baseline = slice_events(calibrations["baseline"], slice(0, count))
     reference_information = calibrations["baseline"]["information"].sum()
-    reward = 0.5 * torch.log((reference_information - baseline["information"][:, None] + information) / reference_information)
-    reward_np = _numpy(reward)
-    normalization = Normalize(vmin=float(reward_np.min()), vmax=float(reward_np.max()) + 1.0e-12)
-    figure = plt.figure(figsize=(5.3 * count, 5.4))
-    for event_index in range(count):
-        axis = figure.add_subplot(1, count, event_index + 1, projection="3d")
-        origins = np.zeros((3, 3))
-        directions = np.stack((_numpy(torch.nn.functional.normalize(selected["visible_obs_a"][event_index, 1:], dim=-1)), _numpy(torch.nn.functional.normalize(selected["visible_obs_b"][event_index, 1:], dim=-1)), _numpy(selected["seed"][event_index])))
-        colors = ("tab:blue", "tab:orange", "black")
-        labels = ("Observed visible A", "Observed visible B", "Seed")
-        for origin, direction, color, label in zip(origins, directions, colors, labels):
-            axis.quiver(*origin, *direction, color=color, linewidth=2.0, label=label)
-        truth = _numpy(selected["k_true"][event_index])
-        axis.quiver(0, 0, 0, *truth, color="magenta", linewidth=2.0, linestyle="--", label="True tau (validation)")
-        candidate_directions = _numpy(candidates["k_a"][event_index])
-        for candidate_index, direction in enumerate(candidate_directions):
-            color = plt.get_cmap("coolwarm")(normalization(reward_np[event_index, candidate_index]))
-            axis.quiver(0, 0, 0, *direction, color=color, linewidth=1.2)
-        best = int(np.argmax(reward_np[event_index]))
-        details = "\n".join(
-            f"{index}: y={float(candidates['y'][event_index, index].detach()):+.2f}, s2={float(information[event_index, index].detach()):.3f}, R={float(reward[event_index, index].detach()):+.2e}"
-            for index in range(group_size)
+    policy_data = {}
+    reward_min = float("inf")
+    reward_max = -float("inf")
+    for name in names:
+        generator = make_generator(device, int(config["seed"]) + 71000)
+        actions, _ = policies[name].sample(selected["context"], group_size, generator)
+        candidates = candidate_reconstruction(selected, actions, config)
+        information = (score_model(candidates["y"]) * candidates["valid"]).square()
+        reward = 0.5 * torch.log(
+            (reference_information - baseline["information"][:, None] + information) / reference_information
         )
-        axis.text2D(0.01, -0.28, details, transform=axis.transAxes, fontsize=6, family="monospace")
-        axis.set(xlim=(-1, 1), ylim=(-1, 1), zlim=(-1, 1), xlabel="x", ylabel="y", zlabel="z", title=f"Event {event_index}; best candidate {best}")
-        if event_index == 0:
-            axis.legend(frameon=False, fontsize=6, loc="upper left")
+        reward_np = _numpy(reward)
+        policy_data[name] = (candidates, information, reward, reward_np)
+        reward_min = min(reward_min, float(reward_np.min()))
+        reward_max = max(reward_max, float(reward_np.max()))
+    normalization = Normalize(vmin=reward_min, vmax=reward_max + 1.0e-12)
+    figure = plt.figure(figsize=(5.3 * count, 4.9 * len(names)))
+    for policy_index, name in enumerate(names):
+        candidates, information, reward, reward_np = policy_data[name]
+        for event_index in range(count):
+            axis = figure.add_subplot(len(names), count, policy_index * count + event_index + 1, projection="3d")
+            origins = np.zeros((3, 3))
+            directions = np.stack((_numpy(torch.nn.functional.normalize(selected["visible_obs_a"][event_index, 1:], dim=-1)), _numpy(torch.nn.functional.normalize(selected["visible_obs_b"][event_index, 1:], dim=-1)), _numpy(selected["seed"][event_index])))
+            colors = ("tab:blue", "tab:orange", "black")
+            labels = ("Observed visible A", "Observed visible B", "Seed")
+            for origin, direction, color, label in zip(origins, directions, colors, labels):
+                axis.quiver(*origin, *direction, color=color, linewidth=2.0, label=label)
+            truth = _numpy(selected["k_true"][event_index])
+            axis.quiver(0, 0, 0, *truth, color="magenta", linewidth=2.0, linestyle="--", label="True tau (validation)")
+            candidate_directions = _numpy(candidates["k_a"][event_index])
+            for candidate_index, direction in enumerate(candidate_directions):
+                color = plt.get_cmap("coolwarm")(normalization(reward_np[event_index, candidate_index]))
+                axis.quiver(0, 0, 0, *direction, color=color, linewidth=1.2)
+            best = int(np.argmax(reward_np[event_index]))
+            details = "\n".join(
+                f"{index}: y={float(candidates['y'][event_index, index].detach()):+.2f}, s2={float(information[event_index, index].detach()):.3f}, R={float(reward[event_index, index].detach()):+.2e}"
+                for index in range(group_size)
+            )
+            axis.text2D(0.01, -0.25, details, transform=axis.transAxes, fontsize=5, family="monospace")
+            axis.set(xlim=(-1, 1), ylim=(-1, 1), zlim=(-1, 1), xlabel="x", ylabel="y", zlabel="z", title=f"{_label(name)}\nEvent {event_index}; best {best}")
+            if policy_index == 0 and event_index == 0:
+                axis.legend(frameon=False, fontsize=6, loc="upper left")
     scalar = plt.cm.ScalarMappable(norm=normalization, cmap="coolwarm")
     color_axis = figure.add_axes((0.93, 0.32, 0.012, 0.38))
     figure.colorbar(scalar, cax=color_axis, label="Replacement reward")
-    figure.suptitle(f"Candidate geometry: {_label(name)}", y=0.99)
-    figure.subplots_adjust(left=0.03, right=0.90, bottom=0.30, top=0.90, wspace=0.25)
+    figure.suptitle("Candidate geometry for the complete 2x2 policy comparison", y=0.995)
+    figure.subplots_adjust(left=0.03, right=0.90, bottom=0.05, top=0.96, wspace=0.25, hspace=0.38)
     figure.savefig(output / "04_candidate_event_display.png", dpi=int(config["plots"]["dpi"]), bbox_inches="tight")
     plt.close(figure)
 
 
 def _plot_training(histories: dict[str, list[dict[str, float]]], config: dict[str, Any], output: Path) -> None:
+    names = comparison_policy_names(config, {"baseline", *histories})[1:]
     metrics = [
         ("fisher", "Fisher"), ("predicted_sigma", r"Predicted $\sigma_C$"),
         ("reward", "Replacement reward"), ("kl_to_reference", r"$D_{KL}(q_\phi||q_{ref})$"),
@@ -308,7 +319,8 @@ def _plot_training(histories: dict[str, list[dict[str, float]]], config: dict[st
     ]
     fig, axes = plt.subplots(2, 3, figsize=(14.0, 7.5))
     for axis, (key, title) in zip(axes.flat, metrics):
-        for name, rows in histories.items():
+        for name in names:
+            rows = histories[name]
             if rows:
                 axis.plot([row["epoch"] for row in rows], [row[key] for row in rows], marker="o", markersize=3, label=_label(name))
         axis.set(xlabel="Epoch", ylabel=title)
@@ -324,7 +336,7 @@ def _plot_training(histories: dict[str, list[dict[str, float]]], config: dict[st
 def _plot_responses(
     events: dict[str, torch.Tensor], calibrations: dict[str, dict[str, torch.Tensor]], config: dict[str, Any], output: Path,
 ) -> None:
-    names = list(calibrations)
+    names = comparison_policy_names(config, calibrations)
     x = _numpy(events["x"])
     bins = int(config["plots"]["response_bins"])
     matrices = {}
@@ -350,7 +362,7 @@ def _plot_responses(
 
 
 def _plot_closure(summaries: list[dict[str, Any]], config: dict[str, Any], output: Path) -> None:
-    names = sorted({row["policy"] for row in summaries})
+    names = comparison_policy_names(config, {row["policy"] for row in summaries})
     fig, axes = plt.subplots(2, 2, figsize=(11.5, 9.0))
     for name in names:
         selected = sorted((row for row in summaries if row["policy"] == name), key=lambda row: row["C_true"])
@@ -382,7 +394,7 @@ def _plot_dashboard(
     events: dict[str, torch.Tensor], calibrations: dict[str, dict[str, torch.Tensor]],
     histories: dict[str, list[dict[str, float]]], summaries: list[dict[str, Any]], config: dict[str, Any], output: Path,
 ) -> None:
-    names = list(calibrations)
+    names = comparison_policy_names(config, calibrations)
     baseline_fisher = float(calibrations["baseline"]["information"].mean())
     rows = []
     for name in names:

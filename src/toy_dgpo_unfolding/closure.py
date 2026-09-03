@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from tqdm.auto import tqdm
 
-from .core import make_generator
+from .core import comparison_policy_names, make_generator
 from .flow import ConditionalFlow
 from .inference import fit_poisson, poisson_score_components, reweighted_templates
 from .training import reconstruct_policy, slice_events
@@ -322,12 +322,7 @@ def run_statistical_closure(
     policies: dict[str, ConditionalFlow],
     output: Path,
 ) -> None:
-    names = [name for name in (
-        "baseline", "fisher_dgpo_trust", "iterative_refresh_trust", "iterative_refresh_no_trust",
-        "fisher_dgpo_no_trust",
-    ) if name in policies]
-    if "baseline" not in names or len(names) < 2:
-        raise RuntimeError("Statistical closure requires the baseline and at least one optimized frozen policy")
+    names = comparison_policy_names(config, policies)
     settings = config["closure"]
     total_events = int(settings["events"])
     if total_events <= 0 or int(settings["chunk_size"]) <= 0:

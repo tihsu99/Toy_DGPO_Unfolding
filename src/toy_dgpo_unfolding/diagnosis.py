@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from tqdm.auto import tqdm
 
-from .core import ScoreModel, make_generator, truth_score
+from .core import ScoreModel, comparison_policy_names, make_generator, truth_score
 from .flow import ConditionalFlow
 from .inference import binned_fisher_per_event
 from .training import reconstruct_policy, slice_events
@@ -403,12 +403,7 @@ def run_diagnosis(
     config: dict[str, Any], device: torch.device, policies: dict[str, ConditionalFlow],
     reference_score: ScoreModel, output: Path,
 ) -> None:
-    names = [name for name in (
-        "baseline", "fisher_dgpo_trust", "iterative_refresh_trust", "iterative_refresh_no_trust",
-        "fisher_dgpo_no_trust",
-    ) if name in policies]
-    if "baseline" not in names or len(names) < 2:
-        raise RuntimeError("Diagnosis requires the baseline and at least one optimized frozen policy")
+    names = comparison_policy_names(config, policies)
     settings = config["diagnosis"]
     count = int(settings["nominal_events"])
     fraction = float(settings["score_train_fraction"])

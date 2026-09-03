@@ -10,7 +10,10 @@ import torch
 from tqdm.auto import tqdm
 import yaml
 
-from .core import ScoreModel, load_config, make_generator, resolve_device, seed_everything
+from .core import (
+    ScoreModel, comparison_policy_names, load_config, make_generator, resolve_device,
+    seed_everything,
+)
 from .flow import ConditionalFlow
 from .inference import binned_fisher_per_event, fit_poisson, reweighted_templates
 from .training import (
@@ -196,7 +199,8 @@ def _save_models(
 
 
 def _load_models(config: dict[str, Any], device: torch.device, checkpoints: Path) -> tuple[dict[str, ConditionalFlow], ScoreModel]:
-    names = [name for name, enabled in config["policies"].items() if enabled]
+    enabled = {name for name, value in config["policies"].items() if value}
+    names = comparison_policy_names(config, enabled)
     policies: dict[str, ConditionalFlow] = {}
     for name in names:
         payload = torch.load(checkpoints / f"{name}.pt", map_location=device, weights_only=True)
@@ -395,6 +399,10 @@ def train_pipeline(
         _write_refresh_artifacts(output, checkpoints, config, "iterative_refresh_no_trust", active_score, rounds, refresh_history)
     if config["policies"].get("fisher_dgpo_trust_bias_control", False):
         raise RuntimeError("Bias-control policy is intentionally disabled until the three primary policies establish score imbalance")
+    policies = {
+        name: policies[name]
+        for name in comparison_policy_names(config, policies)
+    }
     _save_models(policies, score_model, checkpoints)
     _write_history(output, histories)
     ordered_validation_histories = {
@@ -475,16 +483,15 @@ def evaluate_pipeline(
             writer.writerows(data)
     with (output / "summary.json").open("w", encoding="utf-8") as stream:
         json.dump(summaries, stream, indent=2)
+    from .plots import make_all_plots
+    make_all_plots(
+        nominal, calibration_events, policies, score_model, calibrations,
+        histories, fisher_validation, summaries, config, device, output,
+    )
     if config["ablation"].get("enabled", False):
         from .refresh_study import make_ablation_study
         make_ablation_study(
             policies, score_model, histories, summaries, config, device, output, output / "checkpoints",
-        )
-    else:
-        from .plots import make_all_plots
-        make_all_plots(
-            nominal, calibration_events, policies, score_model, calibrations,
-            histories, fisher_validation, summaries, config, device, output,
         )
     return summaries
 
